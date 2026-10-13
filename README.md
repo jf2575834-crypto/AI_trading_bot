@@ -33,3 +33,11 @@ Provides historical and current market data needed by the trading strategies, AI
 Financial Disclosure Data
 Public congressional and institutional financial disclosure data will be collected for the disclosure-following strategy.
 The team will evaluate available APIs or public data sources for retrieving this information.
+
+# Market Data Module (KAN-6)
+Historical/latest stock candles, live WebSocket ingestion, and PostgreSQL storage
+are implemented in `src/trademind/market_data`.
+
+See [setup, usage, provider evaluation, and database handoff](docs/market-data.md).
+Requires Python 3.11+. Install with `python -m pip install -e '.[dev]'` and run
+`trademind-data --help`. Run the tests with `python -m pytest -q`.
