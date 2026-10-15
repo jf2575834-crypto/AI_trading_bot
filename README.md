@@ -4,7 +4,8 @@ Gabriel Chambers — gabriel.chambers@bulldogs.aamu.edu
 Joel Friedman — joel.friedman@bulldogs.aamu.edu 
 Xa-Quan Washington  — xaquan.washingto@bulldogs.aamu.edu 
 Olayiwola Ajibode — olayiwola.ajibod@bulldogs.aamu.edu
-Moshopefoluwa Omotoso — moshopefoluwa.om@bulldogs.aamu.edu
+Moshopefoluwa Omotoso — moshopefoluwa.om@bulldogs.aamu.edu 
+Alejandro Rosa - alejandro.rose@bulldogs.aamu.edu
 Team Project Title:
 TradeMind: AI-Enhanced Automated Trading System
 Type of Software
