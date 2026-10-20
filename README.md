@@ -90,3 +90,92 @@ are implemented in `src/trademind/market_data`.
 See [setup, usage, provider evaluation, and database handoff](docs/market-data.md).
 Requires Python 3.11+. Install with `python -m pip install -e '.[dev]'` and run
 `trademind-data --help`. Run the tests with `python -m pytest -q`.
+
+## Get real-time market data (Alpaca)
+
+The current module streams **one-minute US stock candles** from Alpaca, stores them
+in the database, and prints each persisted live event as a JSON line. These commands
+retrieve data only; they do not place trades. Alpaca's MCP server is not required.
+
+### 1. Get Alpaca API keys
+
+Sign in to the [Alpaca dashboard](https://app.alpaca.markets/account/login), select
+**Paper Trading**, and generate a Key ID and Secret Key in the **API Keys** panel.
+Use your own keys and keep them out of Git, screenshots, and chat.
+
+The free Basic stock feed is **IEX (Investors Exchange)**: real-time activity from
+one exchange, rather than the entire US stock market. Basic allows up to 30 streamed
+symbols. Consolidated real-time SIP data requires an appropriate subscription;
+selecting `sip` alone does not grant access. See
+[Alpaca's current plans](https://docs.alpaca.markets/us/docs/about-market-data-api).
+
+### 2. Install from the repository folder
+
+Open the repository in VS Code and choose **Terminal > New Terminal**. These commands
+use Windows PowerShell and Python 3.11 or later. Skip environment creation if this
+checkout already has a working `.venv`.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+```
+
+### 3. Save and load your configuration
+
+Open the local configuration file (Notepad can create it if it does not exist):
+
+```powershell
+notepad .env.alpaca
+```
+
+Enter the following, replace the two placeholders, and save. Use plain values without
+quotes; keep any existing working keys. SQLite provides a local demonstration without
+setting up a PostgreSQL server.
+
+```dotenv
+ALPACA_API_KEY=your_key_id
+ALPACA_SECRET_KEY=your_secret_key
+ALPACA_DATA_FEED=iex
+DATABASE_URL=sqlite:///market_data.db
+```
+
+`.env.alpaca` is ignored by Git. `.env.example` is a shared template and must not
+contain real credentials. **The CLI does not automatically read `.env` files.**
+Load the saved values into this PowerShell session:
+
+```powershell
+Get-Content .env.alpaca | ForEach-Object {
+    if ($_ -match '^\s*([A-Z_]+)=(.*)$') {
+        Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2].Trim()
+    }
+}
+```
+
+Repeat that loading command after editing the file or opening a new terminal.
+For the team's database, replace `DATABASE_URL` with your PostgreSQL connection
+string; `init-db` creates the development table, not the PostgreSQL database itself.
+
+### 4. Check access, then start streaming
+
+```powershell
+# One request for the latest available minute candle; no database required.
+.\.venv\Scripts\trademind-data.exe latest --symbols AAPL MSFT
+
+# Create the market_candles development table, then receive and store live candles.
+.\.venv\Scripts\trademind-data.exe init-db
+.\.venv\Scripts\trademind-data.exe stream --symbols AAPL MSFT
+```
+
+Leave the terminal open; press **Ctrl+C** to stop. The stream receives completed
+minute candles and later corrections, rather than every trade or bid/ask update.
+Candles arrive after their minute closes, and their UTC timestamps mark the beginning
+of that minute. See [Alpaca's stream documentation](https://docs.alpaca.markets/us/docs/real-time-stock-pricing-data).
+
+If no new eligible trading activity occurs, the stream may be quiet and `latest`
+may return an older candle, especially outside market hours. An old bar alone does
+not establish a feed delay. Missing-key errors mean the environment was not loaded;
+authentication or subscription errors require checking the key pair and feed access.
+
+On macOS/Linux, use `.venv/bin/python` and `.venv/bin/trademind-data`, and set the
+same environment variables with your shell's `export` syntax. See the
+[module guide](docs/market-data.md) for historical backfills, PostgreSQL, and recovery.
