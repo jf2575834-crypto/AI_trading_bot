@@ -1,10 +1,10 @@
+import os
 from logging.config import fileConfig
 from pathlib import Path
-import os
 
+from alembic import context
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, pool
-from alembic import context
 
 # Step 1: Load environment variables
 # Locate the database folder relative to this file.
