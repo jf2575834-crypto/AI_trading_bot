@@ -1,0 +1,25 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Local database files
+*.sqlite
+*.sqlite3
+*.db
+
+# Generated schema reports
+schema_report.txt
+original_schema_report.txt
+migrated_schema_report.txt
