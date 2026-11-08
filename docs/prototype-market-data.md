@@ -113,7 +113,8 @@ from trademind.market_data.storage import SQLCandleStore
 store = SQLCandleStore.from_url(os.environ["DATABASE_URL"])
 try:
     bars = store.history(
-        "AAPL", "1Min",
+        "AAPL",
+        "1Min",
         datetime.fromisoformat("2026-10-16T13:30:00+00:00"),
         datetime.fromisoformat("2026-10-16T19:59:00+00:00"),
         feed="iex",
