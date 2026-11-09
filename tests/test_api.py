@@ -146,3 +146,66 @@ def test_get_assets():
             {"symbol": "MSFT", "name": "Microsoft"},
         ]
     }
+
+
+def test_gui_assets():
+    from fastapi.testclient import TestClient
+
+    from trademind.api.main import app
+
+    response = TestClient(app).get("/api/assets")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ"},
+        {"symbol": "MSFT", "name": "Microsoft", "exchange": "NASDAQ"},
+    ]
+
+
+def test_gui_candles_reject_invalid_range():
+    from fastapi.testclient import TestClient
+
+    from trademind.api.main import app
+
+    response = TestClient(app).get("/api/market/candles/AAPL?range=INVALID")
+
+    assert response.status_code == 422
+
+
+def test_gui_candles_returns_market_data():
+    sample_candle = Candle(
+        symbol="AAPL",
+        timestamp=datetime(2026, 10, 1, tzinfo=UTC),
+        timeframe="1Day",
+        open="100.00",
+        high="105.00",
+        low="99.00",
+        close="103.00",
+        volume="10000",
+    )
+
+    with (
+        patch("trademind.api.main.Settings.from_env") as mock_settings,
+        patch("trademind.api.main.AlpacaClient") as mock_alpaca,
+    ):
+        mock_settings.return_value = object()
+        mock_alpaca.return_value.__enter__.return_value.historical_pages.return_value = [
+            [sample_candle]
+        ]
+
+        response = client.get(
+            "/api/market/candles/AAPL",
+            params={"range": "1M"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "t": "2026-10-01",
+            "o": 100.0,
+            "h": 105.0,
+            "l": 99.0,
+            "c": 103.0,
+            "v": 10000.0,
+        }
+    ]
