@@ -90,3 +90,36 @@ are implemented in `src/trademind/market_data`.
 See [setup, usage, provider evaluation, and database handoff](docs/market-data.md).
 Requires Python 3.11+. Install with `python -m pip install -e '.[dev]'` and run
 `trademind-data --help`. Run the tests with `python -m pytest -q`.
+
+
+# Web App (Frontend + Auth API)
+The React frontend is in `frontend/` and implements every screen in the UI design
+document (login, dashboard, strategies & risk, paper trading, backtesting, AI
+analysis, trade approvals, trade history, settings). Sign-up and login use the
+FastAPI auth API in `src/trademind/api`. All other pages currently run on a
+simulated demo data layer (`frontend/src/data/service.ts`) until the backend
+endpoints exist; the endpoints they need are specified in
+[the API contract](docs/api-contract.md).
+
+Requires Python 3.11+ and Node.js 20+. Run the API and the frontend in two terminals.
+
+Terminal 1, the API (from the project root):
+
+```
+source .venv/bin/activate
+export DATABASE_URL="sqlite:///./trademind-dev.db"
+python -m trademind.api.server   # first time only: creates the account tables
+uvicorn trademind.api.server:create_app_from_env --factory --port 8000
+```
+
+Terminal 2, the frontend:
+
+```
+cd frontend
+npm install    # first time only
+npm run dev
+```
+
+Open http://localhost:5173 and sign up (passwords need at least 12 characters).
+The dev server forwards `/auth` requests to the API on port 8000. For PostgreSQL,
+set `DATABASE_URL` to a PostgreSQL URL and apply `migrations/002_users_sessions.sql`.
