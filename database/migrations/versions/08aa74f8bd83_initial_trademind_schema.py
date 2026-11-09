@@ -34,9 +34,7 @@ def upgrade() -> None:
         sa.Column("username", sa.String(50), nullable=False),
         sa.Column("email", sa.String(255), nullable=False),
         sa.Column("password_hash", sa.Text(), nullable=False),
-        sa.Column(
-            "account_status", sa.String(20), nullable=False, server_default="active"
-        ),
+        sa.Column("account_status", sa.String(20), nullable=False, server_default="active"),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -74,9 +72,7 @@ def upgrade() -> None:
         sa.Column("asset_type", sa.String(30), nullable=False, server_default="stock"),
         sa.Column("exchange", sa.String(50), nullable=True),
         sa.Column("currency", sa.String(3), nullable=False, server_default="USD"),
-        sa.Column(
-            "is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")
-        ),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -176,9 +172,7 @@ def upgrade() -> None:
         ),
         sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("name", sa.String(100), nullable=False),
-        sa.Column(
-            "portfolio_type", sa.String(20), nullable=False, server_default="paper"
-        ),
+        sa.Column("portfolio_type", sa.String(20), nullable=False, server_default="paper"),
         sa.Column(
             "initial_balance",
             sa.Numeric(18, 2),
@@ -212,9 +206,7 @@ def upgrade() -> None:
         ),
         sa.UniqueConstraint("user_id", "name", name="uq_user_portfolio_name"),
         sa.UniqueConstraint("id", "user_id", name="uq_portfolios_id_user"),
-        sa.CheckConstraint(
-            "portfolio_type IN ('paper', 'live')", name="chk_portfolio_type"
-        ),
+        sa.CheckConstraint("portfolio_type IN ('paper', 'live')", name="chk_portfolio_type"),
         sa.CheckConstraint("initial_balance >= 0", name="chk_initial_balance"),
         sa.CheckConstraint("cash_balance >= 0", name="chk_cash_balance"),
         sa.PrimaryKeyConstraint("id", name="portfolios_pkey"),
@@ -278,21 +270,15 @@ def upgrade() -> None:
         sa.Column("strategy_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("parameter_name", sa.String(100), nullable=False),
         sa.Column("parameter_value", postgresql.JSONB(), nullable=False),
-        sa.Column(
-            "created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
-        sa.Column(
-            "updated_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
+        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
         sa.ForeignKeyConstraint(
             ["strategy_id"],
             ["strategies.id"],
             name="strategy_configurations_strategy_id_fkey",
             ondelete="CASCADE",
         ),
-        sa.UniqueConstraint(
-            "strategy_id", "parameter_name", name="uq_strategy_parameter"
-        ),
+        sa.UniqueConstraint("strategy_id", "parameter_name", name="uq_strategy_parameter"),
         sa.PrimaryKeyConstraint("id", name="strategy_configurations_pkey"),
     )
 
@@ -308,9 +294,7 @@ def upgrade() -> None:
         ),
         sa.Column("portfolio_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("asset_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column(
-            "quantity", sa.Numeric(20, 8), nullable=False, server_default=sa.text("0")
-        ),
+        sa.Column("quantity", sa.Numeric(20, 8), nullable=False, server_default=sa.text("0")),
         sa.Column(
             "average_entry_price",
             sa.Numeric(15, 6),
@@ -323,12 +307,8 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("0"),
         ),
-        sa.Column(
-            "created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
-        sa.Column(
-            "updated_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
+        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
         sa.ForeignKeyConstraint(
             ["portfolio_id"],
             ["portfolios.id"],
@@ -415,12 +395,8 @@ def upgrade() -> None:
             server_default=sa.text("false"),
         ),
         sa.Column("risk_check_details", postgresql.JSONB()),
-        sa.Column(
-            "approval_status", sa.String(20), nullable=False, server_default="pending"
-        ),
-        sa.Column(
-            "created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
+        sa.Column("approval_status", sa.String(20), nullable=False, server_default="pending"),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
         sa.ForeignKeyConstraint(
             ["user_id"],
             ["users.id"],
@@ -443,8 +419,7 @@ def upgrade() -> None:
             "decision_type IN ('buy', 'sell', 'hold')", name="chk_trade_decision_type"
         ),
         sa.CheckConstraint(
-            "confidence_score IS NULL OR "
-            "(confidence_score >= 0 AND confidence_score <= 100)",
+            "confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 100)",
             name="chk_trade_confidence",
         ),
         sa.CheckConstraint(
@@ -452,8 +427,7 @@ def upgrade() -> None:
             name="chk_trade_reference_price",
         ),
         sa.CheckConstraint(
-            "approval_status IN "
-            "('pending', 'approved', 'rejected', 'auto_approved')",
+            "approval_status IN ('pending', 'approved', 'rejected', 'auto_approved')",
             name="chk_trade_approval_status",
         ),
         sa.PrimaryKeyConstraint("id", name="trade_decisions_pkey"),
@@ -486,12 +460,8 @@ def upgrade() -> None:
         ),
         sa.Column("submitted_at", sa.DateTime()),
         sa.Column("filled_at", sa.DateTime()),
-        sa.Column(
-            "created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
-        sa.Column(
-            "updated_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
+        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
         sa.Column("portfolio_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.ForeignKeyConstraint(
             ["user_id"], ["users.id"], name="orders_user_id_fkey", ondelete="CASCADE"
@@ -526,9 +496,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("side IN ('buy', 'sell')", name="chk_order_side"),
         sa.CheckConstraint("quantity > 0", name="chk_order_quantity"),
-        sa.CheckConstraint(
-            "limit_price IS NULL OR limit_price > 0", name="chk_order_limit_price"
-        ),
+        sa.CheckConstraint("limit_price IS NULL OR limit_price > 0", name="chk_order_limit_price"),
         sa.CheckConstraint(
             "status IN ('pending', 'submitted', 'partially_filled', "
             "'filled', 'cancelled', 'rejected', 'failed')",
@@ -550,18 +518,14 @@ def upgrade() -> None:
         sa.Column("order_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("execution_quantity", sa.Numeric(20, 8), nullable=False),
         sa.Column("execution_price", sa.Numeric(15, 6), nullable=False),
-        sa.Column(
-            "fees", sa.Numeric(15, 6), nullable=False, server_default=sa.text("0")
-        ),
+        sa.Column("fees", sa.Numeric(15, 6), nullable=False, server_default=sa.text("0")),
         sa.Column(
             "executed_at",
             sa.DateTime(),
             nullable=False,
             server_default=sa.text("now()"),
         ),
-        sa.Column(
-            "created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
         sa.ForeignKeyConstraint(
             ["order_id"],
             ["orders.id"],
@@ -591,13 +555,9 @@ def upgrade() -> None:
         sa.Column("high_price", sa.Numeric(15, 6), nullable=False),
         sa.Column("low_price", sa.Numeric(15, 6), nullable=False),
         sa.Column("close_price", sa.Numeric(15, 6), nullable=False),
-        sa.Column(
-            "volume", sa.BigInteger(), nullable=False, server_default=sa.text("0")
-        ),
+        sa.Column("volume", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
         sa.Column("data_source", sa.String(100)),
-        sa.Column(
-            "created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
         sa.ForeignKeyConstraint(
             ["asset_id"],
             ["assets.id"],
@@ -644,9 +604,7 @@ def upgrade() -> None:
         sa.Column("indicator_value", postgresql.JSONB(), nullable=False),
         sa.Column("timeframe", sa.String(10), nullable=False, server_default="1d"),
         sa.Column("calculated_at", sa.DateTime(), nullable=False),
-        sa.Column(
-            "created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")
-        ),
+        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("now()")),
         sa.ForeignKeyConstraint(
             ["asset_id"],
             ["assets.id"],

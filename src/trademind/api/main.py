@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, model_validator
 
 from trademind.market_data.alpaca import AlpacaClient
 from trademind.market_data.config import Settings
@@ -23,8 +24,26 @@ app.add_middleware(
         "http://127.0.0.1:5173",
     ],
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+
+class TradingParameters(BaseModel):
+    short_window: int = Field(default=20, ge=1)
+    long_window: int = Field(default=50, ge=2)
+
+    @model_validator(mode="after")
+    def validate_windows(self):
+        if self.short_window >= self.long_window:
+            raise ValueError("short_window must be smaller than long_window")
+        return self
+
+
+class TradingRunRequest(BaseModel):
+    symbol: str = Field(pattern=r"^(AAPL|MSFT)$")
+    strategy: str = Field(pattern=r"^moving_average_crossover$")
+    parameters: TradingParameters = Field(default_factory=TradingParameters)
+    execution_mode: str = Field(pattern=r"^(cpu|fpga)$")
 
 
 @app.get("/health")
@@ -33,6 +52,24 @@ def health():
         "status": "ok",
         "service": "TradeMind Backend",
     }
+
+
+@app.get("/api/v1/assets")
+def get_assets():
+    return {
+        "assets": [
+            {"symbol": "AAPL", "name": "Apple"},
+            {"symbol": "MSFT", "name": "Microsoft"},
+        ]
+    }
+
+
+@app.get("/api/assets")
+def get_gui_assets():
+    return [
+        {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ"},
+        {"symbol": "MSFT", "name": "Microsoft", "exchange": "NASDAQ"},
+    ]
 
 
 @app.get("/api/v1/strategies")
@@ -110,6 +147,121 @@ async def get_market_data(
         ) from exc
 
 
+def candle_to_gui_json(candle):
+    """Convert Joel's Candle model to Moshope's chart format."""
+    return {
+        "t": candle.timestamp.date().isoformat(),
+        "o": float(candle.open),
+        "h": float(candle.high),
+        "l": float(candle.low),
+        "c": float(candle.close),
+        "v": float(candle.volume),
+    }
+
+
+def candle_to_gui_quote(candle):
+    """Convert the latest Alpaca minute bar into a GUI quote."""
+    asset_names = {
+        "AAPL": "Apple Inc.",
+        "MSFT": "Microsoft",
+    }
+
+    return {
+        "symbol": candle.symbol,
+        "name": asset_names[candle.symbol],
+        "exchange": "NASDAQ",
+        "price": float(candle.close),
+        "changePct": None,
+        "asOf": candle.timestamp.isoformat().replace("+00:00", "Z"),
+    }
+
+
+@app.get("/api/market/quotes")
+async def get_gui_quotes():
+    try:
+        settings = Settings.from_env()
+
+        def fetch_quotes():
+            with AlpacaClient(settings) as client:
+                return client.latest(["AAPL", "MSFT"])
+
+        candles = await run_in_threadpool(fetch_quotes)
+        return [candle_to_gui_quote(c) for c in candles]
+
+    except MarketDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/market/quotes/{symbol}")
+async def get_gui_quote(symbol: str):
+    ticker = symbol.upper()
+
+    if ticker not in {"AAPL", "MSFT"}:
+        raise HTTPException(status_code=404, detail="Unknown symbol")
+
+    try:
+        settings = Settings.from_env()
+
+        def fetch_quote():
+            with AlpacaClient(settings) as client:
+                return client.latest([ticker])
+
+        candles = await run_in_threadpool(fetch_quote)
+
+        if not candles:
+            raise HTTPException(
+                status_code=503,
+                detail="Latest market price is unavailable",
+            )
+
+        return candle_to_gui_quote(candles[0])
+
+    except MarketDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/market/candles/{symbol}")
+async def get_gui_candles(
+    symbol: str,
+    range: str = Query(default="1M", pattern=r"^(1M|3M|6M|1Y)$"),
+):
+    range_days = {
+        "1M": 30,
+        "3M": 90,
+        "6M": 180,
+        "1Y": 365,
+    }
+
+    try:
+        ticker = symbols([symbol])[0]
+        now = datetime.now(UTC)
+        start = now - timedelta(days=range_days[range])
+        settings = Settings.from_env()
+
+        def fetch_candles():
+            candles = []
+            with AlpacaClient(settings) as client:
+                for page in client.historical_pages(
+                    tickers=[ticker],
+                    frame="1Day",
+                    start=start,
+                    end=now,
+                ):
+                    candles.extend(page)
+
+            return candles
+
+        candles = await run_in_threadpool(fetch_candles)
+        candles.sort(key=lambda candle: candle.timestamp)
+
+        return [candle_to_gui_json(candle) for candle in candles]
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MarketDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 DATASET_DIR = Path(__file__).resolve().parents[3] / "data" / "local"
 
 DAILY_DATASET_FILES = {
@@ -167,3 +319,14 @@ async def get_dataset(symbol: str):
         "sha256": dataset.sha256,
         "candles": [candle.to_json() for candle in dataset.candles],
     }
+
+
+@app.post("/api/v1/trading/run", status_code=501)
+async def run_trading_strategy(request: TradingRunRequest):
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Trading execution is not implemented yet. "
+            "Waiting for CPU algorithm and FPGA integration."
+        ),
+    )
