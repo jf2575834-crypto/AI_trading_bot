@@ -35,7 +35,11 @@ class UserOut(BaseModel):
 
     @classmethod
     def from_user(cls, user: User) -> "UserOut":
-        return cls(id=user.id, email=user.email, created_at=user.created_at)
+        return cls(
+            id=user.id,
+            email=user.email,
+            created_at=user.created_at,
+        )
 
 
 class TokenOut(BaseModel):
@@ -56,12 +60,14 @@ def create_app(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     ) -> User:
         user = store.user_for_token(credentials.credentials) if credentials else None
+
         if user is None:
             raise HTTPException(
                 status_code=401,
                 detail="Not authenticated",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
         return user
 
     @app.get("/health")
@@ -73,14 +79,23 @@ def create_app(
         try:
             user = store.create_user(body.email, body.password)
         except DuplicateEmailError as error:
-            raise HTTPException(status_code=409, detail="Email already registered") from error
+            raise HTTPException(
+                status_code=409,
+                detail="Email already registered",
+            ) from error
+
         return UserOut.from_user(user)
 
     @app.post("/auth/login", response_model=TokenOut)
     def log_in(body: LoginRequest) -> TokenOut:
         user = store.authenticate(body.email, body.password)
+
         if user is None:
-            raise HTTPException(status_code=401, detail="Invalid email or password")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid email or password",
+            )
+
         return TokenOut(access_token=store.create_session(user.id))
 
     @app.post("/auth/logout", status_code=204)
@@ -89,6 +104,7 @@ def create_app(
     ) -> Response:
         if credentials:
             store.delete_session(credentials.credentials)
+
         return Response(status_code=204)
 
     @app.get("/auth/me", response_model=UserOut)
