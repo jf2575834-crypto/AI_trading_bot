@@ -23,3 +23,7 @@ __pycache__/
 schema_report.txt
 original_schema_report.txt
 migrated_schema_report.txt
+
+MIGRATION_NOTES.md
+.DS_Store
+/AI_trading_bot/
