@@ -105,11 +105,10 @@ BUY/SELL/HOLD signals or convert values to FPGA fixed-point representation.
 ```python
 from trademind.market_data.datasets import load_dataset
 
-dataset = load_dataset("data/local/aapl-iex-1day-2026-05-01-to-2026-11-06-v1.json",
-                       min_bars=51)
-prices = dataset.closes                  # Decimal values, oldest first
+dataset = load_dataset("data/local/aapl-iex-1day-2026-05-01-to-2026-11-06-v1.json", min_bars=51)
+prices = dataset.closes  # Decimal values, oldest first
 timestamps = tuple(c.timestamp for c in dataset.candles)  # UTC-aware
-print(dataset.sha256)                    # Identify this exact input in results
+print(dataset.sha256)  # Identify this exact input in results
 ```
 
 The minimum count is supplied by the caller. Fifty closes provide one 50-period
