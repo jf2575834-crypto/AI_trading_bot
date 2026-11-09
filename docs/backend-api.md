@@ -13,14 +13,13 @@ The TradeMind backend uses FastAPI to connect the GUI with historical market dat
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/health` | Check backend availability |
-| GET | `/api/v1/assets` | Retrieve available assets (placeholder) |
+| GET | `/api/v1/assets` | Retrieve supported assets (AAPL and MSFT) |
 | GET | `/api/v1/strategies` | Retrieve available strategies (placeholder) |
 | GET | `/api/v1/market-data` | Retrieve historical data from Alpaca |
 | GET | `/api/v1/datasets/AAPL` | Retrieve local AAPL historical data |
 | GET | `/api/v1/datasets/MSFT` | Retrieve local MSFT historical data |
 | POST | `/api/v1/trading/run` | Submit a trading execution request (not yet implemented) |
 
-**Note:** The current backend code should be checked for `/api/v1/assets` before the GUI relies on that route.
 
 ## Historical Market Data
 
