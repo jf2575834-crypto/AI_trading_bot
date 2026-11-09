@@ -1,4 +1,4 @@
-"""One contract for historical, latest, and streamed OHLCV bars."""
+"""! @brief Define the UTC/Decimal candle contract shared by history and live feeds."""
 
 import re
 from dataclasses import asdict, dataclass
@@ -8,10 +8,15 @@ from typing import Any
 
 
 class MarketDataError(RuntimeError):
-    """A provider request, protocol, or payload could not be processed."""
+    """! @brief A provider request, protocol, or market-data payload could not be processed."""
 
 
 def symbols(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """! @brief Normalize and validate an explicit list of stock symbols.
+    @param values Tickers supplied by a caller or provider response.
+    @return Unique uppercase tickers in their original order.
+    @exception ValueError If the list is empty or any symbol is malformed.
+    """
     result = tuple(dict.fromkeys(value.strip().upper() for value in values))
     if not result or any(not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-/]{0,31}", s) for s in result):
         raise ValueError("Supply explicit ticker symbols, such as AAPL or BRK.B")
@@ -19,6 +24,11 @@ def symbols(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
 
 
 def timeframe(value: str) -> str:
+    """! @brief Validate an Alpaca minute, hour, day, week, or month interval.
+    @param value Provider interval such as 1Min or 1Day.
+    @return The unchanged interval value.
+    @exception ValueError If the interval is unsupported or outside provider limits.
+    """
     if value in {"1Day", "1Week", "1Month", "2Month", "3Month", "4Month", "6Month", "12Month"}:
         return value
     match = re.fullmatch(r"([1-9][0-9]?)(Min|Hour)", value)
@@ -28,6 +38,11 @@ def timeframe(value: str) -> str:
 
 
 def utc_datetime(value: str | datetime) -> datetime:
+    """! @brief Parse an explicit-zone timestamp and normalize it to UTC.
+    @param value ISO-8601 string or timezone-aware datetime.
+    @return Timezone-aware datetime with UTC offset.
+    @exception ValueError If input is malformed or lacks a timezone.
+    """
     stamp = (
         datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
     )
@@ -37,6 +52,11 @@ def utc_datetime(value: str | datetime) -> datetime:
 
 
 def decimal_value(value: Any) -> Decimal:
+    """! @brief Parse a finite nonnegative value within NUMERIC(28,10) precision.
+    @param value Integer, Decimal, or decimal-like string; floats are converted via text.
+    @return Exact Decimal with no rounding.
+    @exception ValueError For booleans, negatives, nonfinite values, or excess precision.
+    """
     if isinstance(value, bool):
         raise ValueError("Boolean is not a price or volume")
     try:
@@ -53,6 +73,10 @@ def decimal_value(value: Any) -> Decimal:
 
 @dataclass(frozen=True)
 class Candle:
+    """! @brief One immutable raw USD OHLCV bar with explicit source and UTC time.
+    Prices and volume use Decimal so JSON and database storage preserve precision.
+    """
+
     symbol: str
     timestamp: datetime
     timeframe: str
@@ -67,6 +91,9 @@ class Candle:
     currency: str = "USD"
 
     def __post_init__(self) -> None:
+        """! @brief Normalize and validate ticker, interval, timestamps, and OHLCV values.
+        @exception ValueError For inconsistent prices, invalid intervals or unsupported provenance.
+        """
         object.__setattr__(self, "symbol", symbols([self.symbol])[0])
         object.__setattr__(self, "timestamp", utc_datetime(self.timestamp))
         timeframe(self.timeframe)
@@ -81,6 +108,14 @@ class Candle:
 
     @classmethod
     def from_alpaca(cls, symbol: str, payload: dict, frame: str, feed: str) -> "Candle":
+        """! @brief Convert one Alpaca bar payload into the shared candle contract.
+        @param symbol Requested ticker.
+        @param payload Alpaca bar fields `t`, `o`, `h`, `l`, `c`, and `v`.
+        @param frame Provider interval for the request.
+        @param feed Feed used to retrieve this bar, IEX or SIP.
+        @return Validated UTC-aware candle with Decimal OHLCV values.
+        @exception MarketDataError If a required field or value is invalid.
+        """
         try:
             return cls(
                 symbol=symbol,
@@ -97,7 +132,9 @@ class Candle:
             raise MarketDataError("Invalid Alpaca OHLCV bar") from exc
 
     def to_json(self) -> dict:
-        """Decimals are strings so JSON consumers do not lose price precision."""
+        """! @brief Serialize a candle with UTC ISO time and decimal-string values.
+        @return JSON-compatible fields preserving exact price and volume precision.
+        """
         values = asdict(self)
         values["timestamp"] = self.timestamp.isoformat().replace("+00:00", "Z")
         for field in ("open", "high", "low", "close", "volume"):

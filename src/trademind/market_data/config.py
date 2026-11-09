@@ -1,4 +1,6 @@
-"""Credentials come from environment variables and are excluded from repr."""
+"""! @brief Load and validate private Alpaca and database connection settings.
+Credential and database URL values are excluded from the settings representation.
+"""
 
 import math
 import os
@@ -7,6 +9,10 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class Settings:
+    """! @brief Immutable settings for market-data requests, streams, and persistence.
+    API keys are required for Alpaca access; the database URL is optional until storage is used.
+    """
+
     api_key: str = field(repr=False)
     secret_key: str = field(repr=False)
     database_url: str = field(default="", repr=False)
@@ -16,6 +22,9 @@ class Settings:
     requests_per_minute: int = 180
 
     def __post_init__(self) -> None:
+        """! @brief Reject blank credentials and invalid feed, retry or rate limits.
+        @exception ValueError If a configured setting falls outside its allowed values.
+        """
         if not self.api_key.strip() or not self.secret_key.strip():
             raise ValueError("Set ALPACA_API_KEY and ALPACA_SECRET_KEY in the environment")
         if self.feed not in {"iex", "sip"}:
@@ -27,6 +36,10 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        """! @brief Build validated settings from the process environment.
+        @return Settings populated from ALPACA_*, DATABASE_URL, and MARKET_DATA_* variables.
+        @exception ValueError If values are missing, malformed or outside allowed limits.
+        """
         return cls(
             api_key=os.getenv("ALPACA_API_KEY", ""),
             secret_key=os.getenv("ALPACA_SECRET_KEY", ""),
@@ -39,8 +52,14 @@ class Settings:
 
     @property
     def headers(self) -> dict[str, str]:
+        """! @brief Return the Alpaca credential headers for the fixed data endpoint.
+        @return API key and secret headers; callers must not log or expose them.
+        """
         return {"APCA-API-KEY-ID": self.api_key, "APCA-API-SECRET-KEY": self.secret_key}
 
     @property
     def stream_url(self) -> str:
+        """! @brief Select Alpaca's WebSocket endpoint for the configured feed.
+        @return IEX or SIP streaming URL.
+        """
         return f"wss://stream.data.alpaca.markets/v2/{self.feed}"

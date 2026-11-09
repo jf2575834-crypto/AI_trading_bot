@@ -93,6 +93,8 @@ Requires Python 3.11+. Install with `python -m pip install -e '.[dev]'` and run
 
 For the FPGA prototype, see [Joel's historical dataset and backend handoff](docs/prototype-market-data.md).
 It covers repeatable offline inputs, saved-data export, and the remaining integration decisions.
+Browse the [generated market-data API reference](docs/API_REFERENCE.md), or download
+its HTML build from the `Build API reference` workflow in GitHub Actions.
 
 # Web App (Frontend + Auth API)
 The React frontend is in `frontend/` and implements every screen in the UI design
