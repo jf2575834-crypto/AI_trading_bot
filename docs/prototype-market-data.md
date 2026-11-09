@@ -42,6 +42,20 @@ Files in this checkout:
 | `data/local/aapl-iex-1min-2026-10-16-v1.json` | 390 | `9155f73593d92d826375d5cdcc11014686d0e2cc7ee9446c32b280d46ee50fea` |
 | `data/local/msft-iex-1min-2026-10-16-v1.json` | 390 | `9e18c9e81f2cd9f4462caf78f7e0fcc41c795f0da0ee5530124347d2d0ade0a1` |
 
+Daily snapshots were also downloaded and verified on November 8 for the daily
+20-period/50-period moving-average inputs described in KAN-8. Both cover May 1
+through November 6, 2026, with 132 provider-reported daily candles each:
+
+| Dataset | Records | Content SHA-256 |
+| --- | ---: | --- |
+| `data/local/aapl-iex-1day-2026-05-01-to-2026-11-06-v1.json` | 132 | `a0c10ea577bd07a76cb0390f50f75b4def85d56b0fc60c63c1892655a87deeca` |
+| `data/local/msft-iex-1day-2026-05-01-to-2026-11-06-v1.json` | 132 | `be166aacfd4afe59a52342cfddeafb5435f360793a268fcc5c9e4bd98b0c4b80` |
+
+Daily bars were fetched using the provider's `1Day` interval, not calculated from
+the one-day minute samples. They retain the same Alpaca/IEX/raw/USD provenance.
+The close is the close reported by that feed. These datasets do not establish
+agreement with another feed or implement the trading strategy.
+
 The source records are also stored in local SQLite database `demo_market_data.db`.
 The database and downloaded datasets are ignored by Git. They are not included
 when another member clones the repository. Share the selected snapshot through
@@ -55,10 +69,14 @@ Open a terminal in this TradeMind repository and run:
 
 ```powershell
 .\.venv\Scripts\python.exe examples\read_demo_data.py
+.\.venv\Scripts\python.exe examples\read_demo_data.py --timeframe 1Day
 ```
 
 This loads both local snapshots without network access or API keys, validates
 their contents, and prints their record counts, ranges and identifiers.
+The default selects minute bars; `--timeframe 1Day` selects daily bars and checks
+that each contains at least 51 observations. The verifier also checks that each
+file's symbol, timeframe, provider and feed match the selected demonstration.
 
 Xa-Quan can read the same prices in Python:
 
@@ -78,6 +96,44 @@ fill missing bars or silently convert prices to floats or FPGA fixed-point value
 Each candle also contains open, high, low, close, volume, symbol, timeframe,
 provider, feed, adjustment and currency. JSON prices/volume are decimal strings;
 the Python loader returns Decimal values.
+
+## Daily inputs for 20-day and 50-day averages
+
+Use the daily snapshot with a minimum of 51 candles:
+
+```python
+from trademind.market_data.datasets import load_dataset
+
+dataset = load_dataset(
+    "data/local/aapl-iex-1day-2026-05-01-to-2026-11-06-v1.json",
+    min_bars=51,
+)
+prices = dataset.closes
+timestamps = tuple(candle.timestamp for candle in dataset.candles)
+```
+
+Twenty and fifty refer to consecutive daily candle observations, not calendar
+days. Fifty closes supply the first 50-period average; 51 supply two consecutive
+50-period windows for a crossover comparison. Weekends and other dates without
+provider bars are not filled with invented prices. Preserve the provider's UTC
+timestamps; do not assume every daily bar starts at the same UTC hour across
+daylight-saving changes. Values remain raw, unadjusted prices, so corporate-action
+handling must be agreed with the strategy owner before selecting a final dataset.
+The 132-bar samples allow warmup and later comparisons; no BUY/SELL/HOLD outputs
+or CPU/FPGA equivalence have been verified yet.
+
+To recreate the daily inputs, load the private environment configuration as
+described below, initialize a development database and create `data/local`, then run:
+
+```powershell
+.\.venv\Scripts\trademind-data.exe history --symbols AAPL MSFT --timeframe 1Day --start 2026-05-01T00:00:00Z --end 2026-11-06T23:59:59Z
+.\.venv\Scripts\trademind-data.exe export --symbol AAPL --feed iex --timeframe 1Day --start 2026-05-01T00:00:00Z --end 2026-11-06T23:59:59Z --min-bars 51 --output data/local/aapl-iex-1day-2026-05-01-to-2026-11-06-v1.json
+.\.venv\Scripts\trademind-data.exe export --symbol MSFT --feed iex --timeframe 1Day --start 2026-05-01T00:00:00Z --end 2026-11-06T23:59:59Z --min-bars 51 --output data/local/msft-iex-1day-2026-05-01-to-2026-11-06-v1.json
+```
+
+Existing files remain protected from overwrite. The generic `history`/`export`
+commands already support `1Day`; no provider API or database schema change is
+required. Daily and minute bars are stored and queried as separate series.
 
 ## Retrieve another fixed range
 

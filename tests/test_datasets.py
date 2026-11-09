@@ -95,15 +95,16 @@ def test_loader_rejects_changed_content_and_wrong_format(raw_bar, tmp_path):
             load_dataset(path)
 
 
+@pytest.mark.parametrize("frame", ["1Min", "1Day"])
 def test_export_cli_needs_no_api_keys_and_handles_missing_data(
-    monkeypatch, tmp_path, raw_bar, capsys
+    monkeypatch, tmp_path, raw_bar, capsys, frame
 ):
     from trademind.market_data.storage import SQLCandleStore
 
     url = f"sqlite:///{tmp_path / 'history.db'}"
     store = SQLCandleStore.from_url(url)
     store.create_schema()
-    candle = Candle.from_alpaca("AAPL", raw_bar, "1Min", "iex")
+    candle = Candle.from_alpaca("AAPL", raw_bar, frame, "iex")
     store.upsert([candle])
     store.engine.dispose()
     monkeypatch.setenv("DATABASE_URL", url)
@@ -117,6 +118,8 @@ def test_export_cli_needs_no_api_keys_and_handles_missing_data(
         "AAPL",
         "--feed",
         "iex",
+        "--timeframe",
+        frame,
         "--start",
         "2026-10-01T14:30:00Z",
         "--end",
@@ -134,3 +137,20 @@ def test_export_cli_needs_no_api_keys_and_handles_missing_data(
     argv[3] = "MSFT"
     assert main() == 1
     assert "found 0" in capsys.readouterr().err
+
+
+def test_daily_dataset_preserves_sessions_and_requires_crossover_warmup(store, raw_bar, tmp_path):
+    first = Candle.from_alpaca("AAPL", raw_bar, "1Day", "iex")
+    bars = tuple(replace(first, timestamp=first.timestamp + timedelta(days=i)) for i in range(51))
+    # Synthetic sessions exercise storage and length checks without assuming a market calendar.
+    store.upsert([*reversed(bars), replace(first, timeframe="1Min"), replace(first, feed="sip")])
+    selected = store.history("AAPL", "1Day", bars[0].timestamp, bars[-1].timestamp)
+    assert selected == bars
+    path = tmp_path / "daily.json"
+    with pytest.raises(ValueError, match="at least 51"):
+        save_dataset(path, selected[:50], bars[0].timestamp, bars[-1].timestamp, min_bars=51)
+    assert not path.exists()
+    save_dataset(path, selected, bars[0].timestamp, bars[-1].timestamp, min_bars=51)
+    loaded = load_dataset(path, min_bars=51)
+    assert loaded.candles == bars
+    assert loaded.closes == tuple(bar.close for bar in bars)
