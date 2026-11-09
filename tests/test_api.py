@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -61,3 +62,40 @@ def test_invalid_symbol():
     )
 
     assert response.status_code == 400
+
+
+def test_get_dataset():
+    sample_candle = Candle(
+        symbol="AAPL",
+        timestamp=datetime(2026, 10, 1, tzinfo=UTC),
+        timeframe="1Day",
+        open="100.00",
+        high="105.00",
+        low="99.00",
+        close="103.00",
+        volume="10000",
+        feed="iex",
+        provider="alpaca",
+    )
+
+    mock_dataset = SimpleNamespace(
+        candles=(sample_candle,) * 51,
+        sha256="a" * 64,
+    )
+
+    with patch(
+        "trademind.api.main.load_dataset",
+        return_value=mock_dataset,
+    ):
+        response = client.get("/api/v1/datasets/AAPL")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["symbol"] == "AAPL"
+    assert data["timeframe"] == "1Day"
+    assert data["feed"] == "iex"
+    assert data["count"] == 51
+    assert len(data["candles"]) == 51
+    assert data["sha256"] == "a" * 64

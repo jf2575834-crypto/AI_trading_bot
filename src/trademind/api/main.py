@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
@@ -6,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from trademind.market_data.alpaca import AlpacaClient
 from trademind.market_data.config import Settings
+from trademind.market_data.datasets import load_dataset
 from trademind.market_data.models import MarketDataError, symbols, timeframe
 
 app = FastAPI(
@@ -106,3 +108,62 @@ async def get_market_data(
             status_code=502,
             detail=str(exc),
         ) from exc
+
+
+DATASET_DIR = Path(__file__).resolve().parents[3] / "data" / "local"
+
+DAILY_DATASET_FILES = {
+    "AAPL": "aapl-iex-1day-2026-05-01-to-2026-11-06-v1.json",
+    "MSFT": "msft-iex-1day-2026-05-01-to-2026-11-06-v1.json",
+}
+
+
+@app.get("/api/v1/datasets/{symbol}")
+async def get_dataset(symbol: str):
+    ticker = symbol.upper()
+
+    if ticker not in DAILY_DATASET_FILES:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No offline dataset configured for {ticker}",
+        )
+
+    path = DATASET_DIR / DAILY_DATASET_FILES[ticker]
+
+    try:
+        dataset = await run_in_threadpool(
+            load_dataset,
+            path,
+            min_bars=51,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Offline dataset is not available on this server",
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Offline dataset could not be loaded or verified",
+        ) from exc
+
+    if any(
+        candle.symbol != ticker
+        or candle.timeframe != "1Day"
+        or candle.feed != "iex"
+        or candle.provider != "alpaca"
+        for candle in dataset.candles
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail="Offline dataset contains unexpected market data",
+        )
+
+    return {
+        "symbol": ticker,
+        "timeframe": "1Day",
+        "feed": "iex",
+        "count": len(dataset.candles),
+        "sha256": dataset.sha256,
+        "candles": [candle.to_json() for candle in dataset.candles],
+    }
