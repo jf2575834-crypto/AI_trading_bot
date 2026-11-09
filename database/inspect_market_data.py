@@ -17,12 +17,27 @@ with engine.connect() as conn:
     for label, query in {
         "revision": "SELECT * FROM alembic_version",
         "timezone": "SHOW timezone",
-        "summary": 'SELECT count(*) AS rows, min("timestamp") AS earliest, max("timestamp") AS latest FROM market_data',
+        "summary": (
+            'SELECT count(*) AS rows, min("timestamp") AS earliest, '
+            'max("timestamp") AS latest FROM market_data'
+        ),
         "sources": "SELECT data_source, count(*) FROM market_data GROUP BY data_source",
-        "currencies": "SELECT a.currency, count(*) FROM market_data m LEFT JOIN assets a ON a.id=m.asset_id GROUP BY a.currency",
+        "currencies": (
+            "SELECT a.currency, count(*) FROM market_data m "
+            "LEFT JOIN assets a ON a.id=m.asset_id GROUP BY a.currency"
+        ),
     }.items():
-        print(label, json.dumps([dict(r) for r in conn.execute(text(query)).mappings()], default=str))
+        rows = [dict(r) for r in conn.execute(text(query)).mappings()]
+        print(label, json.dumps(rows, default=str))
     inspector = inspect(conn)
-    for method in ("get_columns", "get_pk_constraint", "get_foreign_keys", "get_unique_constraints", "get_check_constraints", "get_indexes"):
+    methods = (
+        "get_columns",
+        "get_pk_constraint",
+        "get_foreign_keys",
+        "get_unique_constraints",
+        "get_check_constraints",
+        "get_indexes",
+    )
+    for method in methods:
         print(method, json.dumps(getattr(inspector, method)("market_data"), default=str))
 engine.dispose()
