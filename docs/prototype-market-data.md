@@ -25,7 +25,7 @@ changes in [KAN-19](https://bulldogs-team-wo34d7kp.atlassian.net/browse/KAN-19).
 ## Verified local results
 
 The existing Alpaca ingestion implementation is already merged into GitHub main.
-Branch `codex/kan-31-market-data-datasets` adds a stored-history reader,
+Merged PR #5 added a stored-history reader,
 offline JSON snapshot export, checksum verification and tests.
 
 On November 8, 2026, a real authenticated Alpaca historical request retrieved
@@ -139,11 +139,13 @@ required. Daily and minute bars are stored and queried as separate series.
 
 Install the project as described in README.md, then load the environment variables
 from your private local configuration as described in docs/market-data.md. Set
-`DATABASE_URL` to your development database and create the output directory:
+`DATABASE_URL` to your development database and create the output directory.
+For PostgreSQL, first apply the migrations in [database/README.md](../database/README.md).
+For a standalone SQLite demo only, run `trademind-data init-db` after setting its
+SQLite URL. Do not use that command for PostgreSQL:
 
 ```powershell
 New-Item -ItemType Directory -Force data/local | Out-Null
-.\.venv\Scripts\trademind-data.exe init-db
 .\.venv\Scripts\trademind-data.exe history --symbols AAPL MSFT --timeframe 1Min --start 2026-10-16T13:30:00Z --end 2026-10-16T19:59:00Z
 .\.venv\Scripts\trademind-data.exe export --symbol AAPL --feed iex --timeframe 1Min --start 2026-10-16T13:30:00Z --end 2026-10-16T19:59:00Z --min-bars 100 --output data/local/aapl-iex-1min-2026-10-16-v1.json
 .\.venv\Scripts\trademind-data.exe export --symbol MSFT --feed iex --timeframe 1Min --start 2026-10-16T13:30:00Z --end 2026-10-16T19:59:00Z --min-bars 100 --output data/local/msft-iex-1min-2026-10-16-v1.json
@@ -180,8 +182,9 @@ finally:
     store.engine.dispose()
 ```
 
-The reader uses the existing `market_candles` table and returns ascending,
-immutable candles from one explicit feed. It does not create HTTP routes.
+The reader automatically uses shared `assets`/`market_data` for PostgreSQL and the
+existing `market_candles` table for SQLite. It returns ascending, immutable candles
+from one explicit feed. It does not create HTTP routes.
 In a server, manage the engine at application lifetime rather than per request.
 SQLite is for the local demonstration; PostgreSQL is the intended shared store.
 
@@ -195,21 +198,16 @@ SQLite is for the local demonstration; PostgreSQL is the intended shared store.
   paths. Record the dataset identifier and sample count in benchmark results.
   Load data before timing compute-only benchmarks; report transfers separately
   when measuring end-to-end performance.
-- With the database owner: reconcile the open
-  [database PR #4](https://github.com/jf2575834-crypto/AI_trading_bot/pull/4).
-  Its `market_data` table differs from the ingestion table: asset UUID rather than
-  symbol; `1m` rather than `1Min`; `open_price`/`close_price` field names;
-  timezone-naive timestamps rather than TIMESTAMPTZ; NUMERIC(15,6) prices rather
-  than NUMERIC(28,10); integer volume; and no separate feed/adjustment/currency
-  provenance in its uniqueness key. Joel's coordination message confirms he is
-  willing to adapt the pipeline to the team's `market_data` table. Agree the exact
-  field/timeframe mapping, UTC handling, precision policy and provenance before
-  implementing that adapter under KAN-31/KAN-60, with schema changes through KAN-19.
-  The reader in this change still uses `market_candles`; no shared schema migration
-  was changed or applied here.
+- With the database owner: review the shared storage adapter under KAN-31/KAN-60.
+  It targets the merged `market_data` schema using asset UUIDs, mapped OHLC columns
+  and intervals, UTC-aware timestamps, NUMERIC(28,10), and the seven-field provenance
+  identity. See [storage behavior](market-data.md#shared-database-storage-kan-60--kan-31).
+  The adapter uses the existing migrations; it does not change shared schema or
+  automatically transfer the local SQLite records or JSON snapshots.
 - With the backend owner: connect the agreed reader/adapter to the API and verify
-  a real algorithm run consumes it. Algorithm integration, shared PostgreSQL access
-  and FPGA execution have not been verified by this market-data test.
+  a real algorithm run consumes it. PostgreSQL storage is exercised against the
+  team's migrations in isolated test schemas; a deployed shared database, backend
+  algorithm integration and FPGA execution are not established by those tests.
 
 ## Verification
 

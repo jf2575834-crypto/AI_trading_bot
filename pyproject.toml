@@ -21,7 +21,7 @@ dependencies = [
 
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1", "alembic>=1.13,<2", "python-dotenv>=1,<2"]
 
 [project.scripts]
 trademind-data = "trademind.market_data.cli:main"

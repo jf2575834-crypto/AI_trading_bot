@@ -131,8 +131,8 @@ python -m alembic upgrade head
 
 This runs the initial schema and subsequent migration. It creates shared tables,
 including `assets` and `market_data`. It does not seed assets or download candles.
-Do not run Joel's `trademind-data init-db` for shared database setup: its current
-implementation creates the separate `market_candles` table.
+Do not run Joel's `trademind-data init-db` for shared database setup: it is reserved
+for the SQLite demo and rejects PostgreSQL. Alembic owns the shared schema.
 
 ### Existing database
 
@@ -211,7 +211,12 @@ the application; it does not replace applying migrations in step 6.
 
 ## 8. Connect the market-data writer
 
-The database is ready after step 7, but Joel's current writer needs adaptation:
+The database is ready after step 7. Joel's `SQLCandleStore` now selects the shared
+adapter automatically for PostgreSQL. Configure the same `DATABASE_URL` in the
+ingestion process; the ingestion CLI reads exported environment variables and does
+not automatically load `database/.env`. Install the root package with
+`python -m pip install -e .` from the repository root before invoking `trademind-data`.
+The adapter implements these mappings:
 
 - Target `market_data` and resolve candle symbols through `assets` to `asset_id`.
 - Map `open/high/low/close` to the existing `*_price` columns.
@@ -223,8 +228,16 @@ The database is ready after step 7, but Joel's current writer needs adaptation:
   need an agreed schema change before storage; do not silently relabel them.
 - Update historical/latest-timestamp reads to use the same asset and provenance filters.
 
+Missing stock symbols are added atomically with their candle page as stock/USD
+assets. UUIDs are generated, other asset fields use the shared defaults, and
+unknown optional company/exchange fields are left unset. Pre-register ETFs with
+their proper classification. Existing USD stock/ETF metadata is preserved;
+incompatible asset metadata or ambiguous symbol casing is reported as an error.
+Reads never register assets. Existing SQLite/demo JSON data stays local until
+explicitly ingested or imported into the shared database.
+
 See [Joel's module guide](../docs/market-data.md) for ingestion behavior; its separate-table
-setup instructions describe his original implementation, not this shared schema.
+SQLite setup instructions apply only to the local demonstration.
 
 ## Troubleshooting
 
