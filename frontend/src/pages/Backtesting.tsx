@@ -1,12 +1,13 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { GroupedBars, LineChart, SERIES } from "../components/charts";
 import { Field } from "../components/Field";
 import { Icon } from "../components/Icon";
 import { Badge, Card, ErrorState, IconTile, Notice, SideBadge, Skeleton, Stat } from "../components/ui";
-import { getLastBacktest, getStrategies, listAssets, runBacktest } from "../data/service";
+import { DATA_START, hasErrors, parseNumber, validateBacktest } from "../data/rules";
+import { getLastBacktest, getStrategies, runBacktest } from "../data/service";
 import type { BacktestResult } from "../data/types";
-import { dateTime, longDate, money, pct, signedMoney, signedPct, tone } from "../lib/format";
+import { daysAgo, dateTime, errorMessage, longDate, money, pct, signedMoney, signedPct, tone } from "../lib/format";
 import { useAsync } from "../lib/hooks";
 import { useSession } from "../lib/session";
 
@@ -20,35 +21,11 @@ type Form = {
   slippagePct: string;
 };
 
+/** Passed via router state when testing an AI recommendation. */
 export type BacktestNavState = { strategyId: string; overrides: Record<string, number>; note: string };
 
-function today() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function yearAgo() {
-  const d = new Date();
-  d.setFullYear(d.getFullYear() - 1);
-  return d.toISOString().slice(0, 10);
-}
-
-function validate(f: Form) {
-  const e: Partial<Record<keyof Form, string>> = {};
-  if (!f.strategyId) e.strategyId = "Choose a strategy";
-  if (!f.symbol) e.symbol = "Choose an asset";
-  if (!f.startDate) e.startDate = "Choose a start date";
-  if (!f.endDate) e.endDate = "Choose an end date";
-  else if (f.startDate && f.endDate < f.startDate) e.endDate = "End date cannot be before the start date";
-  else if (f.endDate > today()) e.endDate = "End date cannot be in the future";
-  if (f.startDate && f.startDate < "2023-01-02") e.startDate = "Data starts on Jan 2, 2023";
-  if (!(Number(f.initialCapital) >= 100)) e.initialCapital = "Enter at least $100";
-  if (!(Number(f.feePct) >= 0 && Number(f.feePct) <= 5) || f.feePct.trim() === "") e.feePct = "Enter 0 to 5";
-  if (!(Number(f.slippagePct) >= 0 && Number(f.slippagePct) <= 5) || f.slippagePct.trim() === "") e.slippagePct = "Enter 0 to 5";
-  return e;
-}
-
 export function Backtesting() {
-  const { settings } = useSession();
+  const { settings, assets } = useSession();
   const location = useLocation();
   const nav = (location.state as BacktestNavState | null) ?? null;
   const strategies = useAsync(getStrategies, []);
@@ -57,8 +34,8 @@ export function Backtesting() {
   const [form, setForm] = useState<Form>({
     strategyId: nav?.strategyId ?? "ma-crossover",
     symbol: "AAPL",
-    startDate: yearAgo(),
-    endDate: today(),
+    startDate: daysAgo(365),
+    endDate: daysAgo(0),
     initialCapital: "10000",
     feePct: "0.05",
     slippagePct: "0.05",
@@ -72,9 +49,19 @@ export function Backtesting() {
     if (!result && last.data) setResult(last.data);
   }, [last.data, result]);
 
-  const errors = validate(form);
-  const valid = Object.keys(errors).length === 0;
+  const request = {
+    strategyId: form.strategyId,
+    symbol: form.symbol,
+    startDate: form.startDate,
+    endDate: form.endDate,
+    initialCapital: parseNumber(form.initialCapital),
+    feePct: parseNumber(form.feePct),
+    slippagePct: parseNumber(form.slippagePct),
+  };
+  const errors = validateBacktest(request, daysAgo(0));
+  const valid = !hasErrors(errors);
   const set = (k: keyof Form, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const err = (k: keyof Form) => (touched ? errors[k] : undefined);
 
   async function run(e: FormEvent) {
     e.preventDefault();
@@ -83,20 +70,10 @@ export function Backtesting() {
     setRunning(true);
     setRunError(null);
     try {
-      setResult(
-        await runBacktest({
-          strategyId: form.strategyId,
-          symbol: form.symbol,
-          startDate: form.startDate,
-          endDate: form.endDate,
-          initialCapital: Number(form.initialCapital),
-          feePct: Number(form.feePct),
-          slippagePct: Number(form.slippagePct),
-          paramOverrides: overrides && overrides.strategyId === form.strategyId ? overrides.overrides : undefined,
-        }),
-      );
-    } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Backtest failed");
+      const paramOverrides = overrides && overrides.strategyId === form.strategyId ? overrides.overrides : undefined;
+      setResult(await runBacktest({ ...request, paramOverrides }));
+    } catch (error) {
+      setRunError(errorMessage(error, "Backtest failed"));
     } finally {
       setRunning(false);
     }
@@ -111,16 +88,13 @@ export function Backtesting() {
       ["date", "strategy_equity", "benchmark_equity"],
       ...result.equity.map((p, i) => [p.t, p.value, result.benchmark[i].value]),
     ];
-    const blob = new Blob([rows.map((r) => r.join(",")).join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(new Blob([rows.map((r) => r.join(",")).join("\n")], { type: "text/csv" }));
     const a = document.createElement("a");
     a.href = url;
     a.download = `backtest-${result.request.symbol}-${result.request.startDate}-${result.request.endDate}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
-
-  const err = (k: keyof Form) => (touched ? errors[k] : undefined);
 
   return (
     <div className="page">
@@ -134,11 +108,19 @@ export function Backtesting() {
         </button>
       </div>
 
-      <Card title="Backtest configuration" subtitle="Choose a strategy, security, historical period, and cost assumptions." icon="history" actions={<Badge tone="info">Historical data</Badge>}>
+      <Card
+        title="Backtest configuration"
+        subtitle="Choose a strategy, security, historical period, and cost assumptions."
+        icon="history"
+        actions={<Badge tone="info">Historical data</Badge>}
+      >
         {overrides && (
           <Notice tone="warning" title="Testing a recommendation">
             {overrides.note} Parameters:{" "}
-            {Object.entries(overrides.overrides).map(([k, v]) => `${k} = ${v}`).join(", ")}. Saved strategy settings are not changed.{" "}
+            {Object.entries(overrides.overrides)
+              .map(([k, v]) => `${k} = ${v}`)
+              .join(", ")}
+            . Saved strategy settings are not changed.{" "}
             <button type="button" className="link-btn" onClick={() => setOverrides(null)}>
               Use saved parameters instead
             </button>
@@ -156,7 +138,7 @@ export function Backtesting() {
           </Field>
           <Field label="Stock symbol" error={err("symbol")}>
             <select value={form.symbol} onChange={(e) => set("symbol", e.target.value)}>
-              {listAssets().map((a) => (
+              {assets.map((a) => (
                 <option key={a.symbol} value={a.symbol}>
                   {a.symbol} — {a.name}
                 </option>
@@ -164,10 +146,10 @@ export function Backtesting() {
             </select>
           </Field>
           <Field label="Start date" error={err("startDate")}>
-            <input type="date" min="2023-01-02" max={today()} value={form.startDate} onChange={(e) => set("startDate", e.target.value)} />
+            <input type="date" min={DATA_START} max={daysAgo(0)} value={form.startDate} onChange={(e) => set("startDate", e.target.value)} />
           </Field>
           <Field label="End date" error={err("endDate")}>
-            <input type="date" min="2023-01-02" max={today()} value={form.endDate} onChange={(e) => set("endDate", e.target.value)} />
+            <input type="date" min={DATA_START} max={daysAgo(0)} value={form.endDate} onChange={(e) => set("endDate", e.target.value)} />
           </Field>
           <Field label="Initial capital ($)" error={err("initialCapital")}>
             <input inputMode="decimal" value={form.initialCapital} onChange={(e) => set("initialCapital", e.target.value)} />
@@ -184,8 +166,8 @@ export function Backtesting() {
         </form>
         <div className="bt-foot">
           <span className="muted small with-icon">
-            <Icon name="info" size={14} /> Signals use only data available at each simulated day and fill at the next day's open. Fees and slippage
-            are applied to every fill.
+            <Icon name="info" size={14} /> Signals use only data available at each simulated day and fill at the next day's open. Fees and slippage are
+            applied to every fill.
           </span>
           <Badge tone={valid ? "success" : "neutral"}>{valid ? "Ready to run" : "Check inputs"}</Badge>
         </div>
@@ -196,16 +178,12 @@ export function Backtesting() {
       </Notice>
 
       {runError && <ErrorState message={runError} />}
-      {running ? (
+      {running || (last.loading && !result) ? (
         <Card>
-          <Skeleton rows={8} />
+          <Skeleton rows={running ? 8 : 4} />
         </Card>
       ) : result ? (
         <Results result={result} timeZone={settings.timezone} />
-      ) : last.loading ? (
-        <Card>
-          <Skeleton rows={4} />
-        </Card>
       ) : (
         <div className="empty card">No backtest has been run yet. Configure one above.</div>
       )}
@@ -213,14 +191,20 @@ export function Backtesting() {
   );
 }
 
-function Results({ result, timeZone }: { result: BacktestResult; timeZone: string }) {
+function Results({ result: r, timeZone }: { result: BacktestResult; timeZone: string }) {
   const [showAll, setShowAll] = useState(false);
-  const r = result;
   const req = r.request;
   const gain = r.finalValue - req.initialCapital;
   const alpha = r.totalReturnPct - r.benchmarkReturnPct;
   const trades = showAll ? r.trades : r.trades.slice(-10).reverse();
   const months = Math.max(1, r.equity.length / 21);
+  const lines = useMemo(
+    () => [
+      { name: "Strategy", points: r.equity, color: SERIES.primary },
+      { name: "S&P 500 (simulated)", points: r.benchmark, color: SERIES.benchmark, dashed: true },
+    ],
+    [r],
+  );
 
   return (
     <>
@@ -255,13 +239,7 @@ function Results({ result, timeZone }: { result: BacktestResult; timeZone: strin
             </div>
           }
         >
-          <LineChart
-            label="Strategy equity versus benchmark"
-            series={[
-              { name: "Strategy", points: r.equity, color: SERIES.primary },
-              { name: "S&P 500 (simulated)", points: r.benchmark, color: SERIES.benchmark, dashed: true },
-            ]}
-          />
+          <LineChart label="Strategy equity versus benchmark" series={lines} />
         </Card>
         <Card title="Strategy vs. benchmark" subtitle="Return per period">
           <div className="compare">
@@ -297,13 +275,22 @@ function Results({ result, timeZone }: { result: BacktestResult; timeZone: strin
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th>Date</th><th>Side</th><th className="num">Quantity</th><th className="num">Fill price</th><th className="num">Fee</th><th className="num">Realized P/L</th></tr>
+                <tr>
+                  <th>Date</th>
+                  <th>Side</th>
+                  <th className="num">Quantity</th>
+                  <th className="num">Fill price</th>
+                  <th className="num">Fee</th>
+                  <th className="num">Realized P/L</th>
+                </tr>
               </thead>
               <tbody>
                 {trades.map((t) => (
                   <tr key={t.id}>
                     <td>{longDate(t.date)}</td>
-                    <td><SideBadge side={t.side} /></td>
+                    <td>
+                      <SideBadge side={t.side} />
+                    </td>
                     <td className="num">{t.quantity}</td>
                     <td className="num">{money(t.price)}</td>
                     <td className="num">{money(t.fee)}</td>

@@ -19,6 +19,8 @@ export type PortfolioSummary = {
   mode: TradingMode;
   portfolioValue: number;
   availableCash: number;
+  /** Market value of open positions; exposure = investedValue / portfolioValue. */
+  investedValue: number;
   totalReturnPct: number;
   totalReturnAmount: number;
   dayChange: number;
@@ -61,6 +63,8 @@ export type Order = {
   limitPrice: number | null;
   price: number;
   status: OrderStatus;
+  /** Why the server rejected the order (risk limit, insufficient cash, ...). */
+  rejectReason?: string;
   createdAt: string;
 };
 
@@ -81,6 +85,8 @@ export type ParamDef = {
   min?: number;
   max?: number;
   hint?: string;
+  /** Cross-field rule: this value must exceed the param with this key. */
+  greaterThan?: string;
 };
 
 export type StrategyKind = "technical" | "disclosure";

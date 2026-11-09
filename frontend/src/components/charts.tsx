@@ -1,4 +1,4 @@
-import { type ReactNode, useId, useState } from "react";
+import { type PointerEvent, type ReactNode, memo, useId, useMemo, useState } from "react";
 import type { Candle, Point } from "../data/types";
 import { compact, money, shortDate } from "../lib/format";
 import { useWidth } from "../lib/hooks";
@@ -8,18 +8,24 @@ export const SERIES = { primary: "#3b8ff0", benchmark: "#c4823a" };
 const UP = "#22c55e";
 const DOWN = "#ef4444";
 
-type Series = { name: string; points: Point[]; color: string; dashed?: boolean; area?: boolean };
+type Series = { name: string; points: Point[]; color: string; dashed?: boolean };
 
 function niceTicks(min: number, max: number, count = 4): number[] {
   if (min === max) return [min];
-  const span = max - min;
-  const step0 = span / count;
+  const step0 = (max - min) / count;
   const mag = 10 ** Math.floor(Math.log10(step0));
   const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= step0) ?? step0;
-  const start = Math.ceil(min / step) * step;
   const ticks: number[] = [];
-  for (let v = start; v <= max + 1e-9; v += step) ticks.push(Number(v.toFixed(6)));
+  for (let v = Math.ceil(min / step) * step; v <= max + 1e-9; v += step) ticks.push(Number(v.toFixed(6)));
   return ticks;
+}
+
+/** Index of the slot under the pointer, for `n` evenly spaced slots. */
+function slotAt(e: PointerEvent<SVGRectElement>, n: number, centered: boolean): number {
+  const box = e.currentTarget.getBoundingClientRect();
+  const rel = (e.clientX - box.left) / box.width;
+  const i = centered ? Math.round(rel * (n - 1)) : Math.floor(rel * n);
+  return Math.max(0, Math.min(n - 1, i));
 }
 
 function Legend({ items }: { items: { name: string; color: string; dashed?: boolean }[] }) {
@@ -38,9 +44,9 @@ function Legend({ items }: { items: { name: string; color: string; dashed?: bool
 }
 
 function Tooltip({ x, y, width, children }: { x: number; y: number; width: number; children: ReactNode }) {
-  const left = Math.min(Math.max(x + 12, 0), width - 180);
+  const left = x > width - 200 ? x - 192 : Math.max(0, x + 12);
   return (
-    <div className="chart-tip" style={{ left: x > width - 200 ? x - 192 : left, top: Math.max(0, y - 10) }}>
+    <div className="chart-tip" style={{ left, top: Math.max(0, y - 10) }}>
       {children}
     </div>
   );
@@ -53,32 +59,37 @@ type LineChartProps = {
   label: string;
 };
 
-export function LineChart({ series, height = 260, format = (v) => money(v, true), label }: LineChartProps) {
+const wholeDollars = (v: number) => money(v, true);
+
+export const LineChart = memo(function LineChart({ series, height = 260, format = wholeDollars, label }: LineChartProps) {
   const [ref, width] = useWidth<HTMLDivElement>();
   const [hover, setHover] = useState<number | null>(null);
   const gradientId = useId();
   const n = series[0]?.points.length ?? 0;
-  const pad = { l: 60, r: 12, t: 12, b: 26 };
-  const w = Math.max(0, width - pad.l - pad.r);
-  const h = height - pad.t - pad.b;
-  const values = series.flatMap((s) => s.points.map((p) => p.value));
-  const lo = Math.min(...values);
-  const hi = Math.max(...values);
-  const margin = (hi - lo) * 0.08 || Math.abs(hi) * 0.02 || 1;
-  const ticks = niceTicks(lo - margin, hi + margin);
-  const yMin = Math.min(lo - margin, ticks[0]);
-  const yMax = Math.max(hi + margin, ticks[ticks.length - 1]);
-  const x = (i: number) => pad.l + (n <= 1 ? w / 2 : (i / (n - 1)) * w);
-  const y = (v: number) => pad.t + h - ((v - yMin) / (yMax - yMin)) * h;
-  // Roughly one date label per 80px so labels never collide on narrow screens.
-  const labelCount = Math.max(2, Math.min(6, n, Math.floor(w / 80)));
-  const xLabels = n > 1 ? Array.from({ length: labelCount }, (_, k) => Math.round((k / (labelCount - 1)) * (n - 1))) : [0];
 
-  function onMove(e: React.PointerEvent<SVGRectElement>) {
-    const box = e.currentTarget.getBoundingClientRect();
-    const rel = (e.clientX - box.left) / box.width;
-    setHover(Math.max(0, Math.min(n - 1, Math.round(rel * (n - 1)))));
-  }
+  // Geometry depends only on data and size; hovering just moves the crosshair.
+  const geo = useMemo(() => {
+    const pad = { l: 60, r: 12, t: 12, b: 26 };
+    const w = Math.max(0, width - pad.l - pad.r);
+    const h = height - pad.t - pad.b;
+    const values = series.flatMap((s) => s.points.map((p) => p.value));
+    const lo = Math.min(...values);
+    const hi = Math.max(...values);
+    const margin = (hi - lo) * 0.08 || Math.abs(hi) * 0.02 || 1;
+    const ticks = niceTicks(lo - margin, hi + margin);
+    const yMin = Math.min(lo - margin, ticks[0]);
+    const yMax = Math.max(hi + margin, ticks[ticks.length - 1]);
+    const x = (i: number) => pad.l + (n <= 1 ? w / 2 : (i / (n - 1)) * w);
+    const y = (v: number) => pad.t + h - ((v - yMin) / (yMax - yMin)) * h;
+    // Roughly one date label per 80px so labels never collide on narrow screens.
+    const labelCount = Math.max(2, Math.min(6, n, Math.floor(w / 80)));
+    const xLabels = n > 1 ? Array.from({ length: labelCount }, (_, k) => Math.round((k / (labelCount - 1)) * (n - 1))) : [0];
+    const paths = series.map((s) => s.points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(""));
+    const area = paths[0] ? `${paths[0]}L${x(n - 1)},${pad.t + h}L${x(0)},${pad.t + h}Z` : "";
+    return { pad, w, h, ticks, x, y, xLabels, paths, area };
+  }, [series, width, height, n]);
+
+  const { pad, w, h, x, y } = geo;
 
   return (
     <figure className="chart" aria-label={label}>
@@ -92,7 +103,7 @@ export function LineChart({ series, height = 260, format = (v) => money(v, true)
                 <stop offset="1" stopColor={series[0].color} stopOpacity="0" />
               </linearGradient>
             </defs>
-            {ticks.map((t) => (
+            {geo.ticks.map((t) => (
               <g key={t}>
                 <line x1={pad.l} x2={pad.l + w} y1={y(t)} y2={y(t)} className="grid" />
                 <text x={pad.l - 8} y={y(t) + 4} textAnchor="end" className="axis">
@@ -100,22 +111,24 @@ export function LineChart({ series, height = 260, format = (v) => money(v, true)
                 </text>
               </g>
             ))}
-            {xLabels.map((i) => (
+            {geo.xLabels.map((i) => (
               <text key={i} x={x(i)} y={height - 6} textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"} className="axis">
                 {shortDate(series[0].points[i].t)}
               </text>
             ))}
-            {series.map((s, si) => {
-              const d = s.points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join("");
-              return (
-                <g key={s.name}>
-                  {si === 0 && (s.area ?? true) && (
-                    <path d={`${d}L${x(n - 1)},${pad.t + h}L${x(0)},${pad.t + h}Z`} fill={`url(#${gradientId})`} />
-                  )}
-                  <path d={d} fill="none" stroke={s.color} strokeWidth={2} strokeDasharray={s.dashed ? "5 4" : undefined} strokeLinejoin="round" strokeLinecap="round" />
-                </g>
-              );
-            })}
+            <path d={geo.area} fill={`url(#${gradientId})`} />
+            {series.map((s, si) => (
+              <path
+                key={s.name}
+                d={geo.paths[si]}
+                fill="none"
+                stroke={s.color}
+                strokeWidth={2}
+                strokeDasharray={s.dashed ? "5 4" : undefined}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+            ))}
             {hover !== null && (
               <g>
                 <line x1={x(hover)} x2={x(hover)} y1={pad.t} y2={pad.t + h} className="crosshair" />
@@ -130,7 +143,7 @@ export function LineChart({ series, height = 260, format = (v) => money(v, true)
               width={w}
               height={h}
               fill="transparent"
-              onPointerMove={onMove}
+              onPointerMove={(e) => setHover(slotAt(e, n, true))}
               onPointerLeave={() => setHover(null)}
             />
           </svg>
@@ -150,7 +163,7 @@ export function LineChart({ series, height = 260, format = (v) => money(v, true)
       </div>
     </figure>
   );
-}
+});
 
 export function Sparkline({ values, tone }: { values: number[]; tone: "up" | "down" | "flat" }) {
   if (values.length < 2) return null;
@@ -167,31 +180,63 @@ export function Sparkline({ values, tone }: { values: number[]; tone: "up" | "do
   );
 }
 
-export function CandleChart({ candles, height = 320, label }: { candles: Candle[]; height?: number; label: string }) {
+export const CandleChart = memo(function CandleChart({ candles, height = 320, label }: { candles: Candle[]; height?: number; label: string }) {
   const [ref, width] = useWidth<HTMLDivElement>();
   const [hover, setHover] = useState<number | null>(null);
   const n = candles.length;
-  const pad = { l: 8, r: 56, t: 10, b: 24 };
-  const volH = 50;
-  const w = Math.max(0, width - pad.l - pad.r);
-  const h = height - pad.t - pad.b - volH - 8;
-  const lo = Math.min(...candles.map((c) => c.l));
-  const hi = Math.max(...candles.map((c) => c.h));
-  const ticks = niceTicks(lo, hi, 6);
-  const maxV = Math.max(...candles.map((c) => c.v));
-  const slot = n ? w / n : 0;
-  const body = Math.max(1, Math.min(10, slot * 0.6));
-  const x = (i: number) => pad.l + slot * (i + 0.5);
-  const y = (v: number) => pad.t + h - ((v - lo) / (hi - lo || 1)) * h;
-  const volTop = pad.t + h + 8;
+
+  // The candle marks are built once per data/size; hover only toggles one class (CSS dims the rest).
+  const geo = useMemo(() => {
+    const pad = { l: 8, r: 56, t: 10, b: 24 };
+    const volH = 50;
+    const w = Math.max(0, width - pad.l - pad.r);
+    const h = height - pad.t - pad.b - volH - 8;
+    let lo = Infinity;
+    let hi = -Infinity;
+    let maxV = 0;
+    for (const c of candles) {
+      lo = Math.min(lo, c.l);
+      hi = Math.max(hi, c.h);
+      maxV = Math.max(maxV, c.v);
+    }
+    const slot = n ? w / n : 0;
+    const body = Math.max(1, Math.min(10, slot * 0.6));
+    const x = (i: number) => pad.l + slot * (i + 0.5);
+    const y = (v: number) => pad.t + h - ((v - lo) / (hi - lo || 1)) * h;
+    const volTop = pad.t + h + 8;
+    const marks = candles.map((c, i) => {
+      const color = c.c >= c.o ? UP : DOWN;
+      const vh = (c.v / maxV) * volH;
+      return (
+        <g key={c.t} data-i={i}>
+          <line x1={x(i)} x2={x(i)} y1={y(c.h)} y2={y(c.l)} stroke={color} strokeWidth={1} />
+          <rect
+            x={x(i) - body / 2}
+            y={y(Math.max(c.o, c.c))}
+            width={body}
+            height={Math.max(1, Math.abs(y(c.o) - y(c.c)))}
+            rx={1}
+            fill={c.c >= c.o ? "var(--surface)" : color}
+            stroke={color}
+            strokeWidth={1.2}
+          />
+          <rect x={x(i) - body / 2} y={volTop + volH - vh} width={body} height={vh} fill={color} opacity={0.35} />
+        </g>
+      );
+    });
+    return { pad, w, x, y, ticks: niceTicks(lo, hi, 6), marks };
+  }, [candles, width, height, n]);
+
+  const { pad, w, x, y } = geo;
   const hc = hover !== null ? candles[hover] : null;
 
   return (
     <figure className="chart" aria-label={label}>
       <div ref={ref} className="chart-area" style={{ height }}>
         {width > 0 && n > 0 && (
-          <svg width={width} height={height} role="img" aria-label={label}>
-            {ticks.map((t) => (
+          <svg width={width} height={height} role="img" aria-label={label} className={hover !== null ? "candles hovering" : "candles"}>
+            <style>{hover !== null ? `.candles.hovering g[data-i="${hover}"]{opacity:1}` : ""}</style>
+            {geo.ticks.map((t) => (
               <g key={t}>
                 <line x1={pad.l} x2={pad.l + w} y1={y(t)} y2={y(t)} className="grid" />
                 <text x={pad.l + w + 8} y={y(t) + 4} className="axis">
@@ -199,29 +244,7 @@ export function CandleChart({ candles, height = 320, label }: { candles: Candle[
                 </text>
               </g>
             ))}
-            {candles.map((c, i) => {
-              const up = c.c >= c.o;
-              const color = up ? UP : DOWN;
-              const top = y(Math.max(c.o, c.c));
-              const bh = Math.max(1, Math.abs(y(c.o) - y(c.c)));
-              const vh = (c.v / maxV) * volH;
-              return (
-                <g key={c.t} opacity={hover === null || hover === i ? 1 : 0.55}>
-                  <line x1={x(i)} x2={x(i)} y1={y(c.h)} y2={y(c.l)} stroke={color} strokeWidth={1} />
-                  <rect
-                    x={x(i) - body / 2}
-                    y={top}
-                    width={body}
-                    height={bh}
-                    rx={1}
-                    fill={up ? "var(--surface)" : color}
-                    stroke={color}
-                    strokeWidth={1.2}
-                  />
-                  <rect x={x(i) - body / 2} y={volTop + volH - vh} width={body} height={vh} fill={color} opacity={0.35} />
-                </g>
-              );
-            })}
+            {geo.marks}
             {[0, Math.floor(n / 2), n - 1].map((i) => (
               <text key={i} x={x(i)} y={height - 6} textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"} className="axis">
                 {shortDate(candles[i].t)}
@@ -233,10 +256,7 @@ export function CandleChart({ candles, height = 320, label }: { candles: Candle[
               width={w}
               height={height - pad.t - pad.b}
               fill="transparent"
-              onPointerMove={(e) => {
-                const box = e.currentTarget.getBoundingClientRect();
-                setHover(Math.max(0, Math.min(n - 1, Math.floor(((e.clientX - box.left) / box.width) * n))));
-              }}
+              onPointerMove={(e) => setHover(slotAt(e, n, false))}
               onPointerLeave={() => setHover(null)}
             />
           </svg>
@@ -245,11 +265,16 @@ export function CandleChart({ candles, height = 320, label }: { candles: Candle[
           <Tooltip x={x(hover)} y={y(hc.h)} width={width}>
             <div className="tip-title">{shortDate(hc.t)}</div>
             <div className="tip-grid">
-              <span>Open</span><strong>{money(hc.o)}</strong>
-              <span>High</span><strong>{money(hc.h)}</strong>
-              <span>Low</span><strong>{money(hc.l)}</strong>
-              <span>Close</span><strong>{money(hc.c)}</strong>
-              <span>Volume</span><strong>{compact(hc.v)}</strong>
+              <span>Open</span>
+              <strong>{money(hc.o)}</strong>
+              <span>High</span>
+              <strong>{money(hc.h)}</strong>
+              <span>Low</span>
+              <strong>{money(hc.l)}</strong>
+              <span>Close</span>
+              <strong>{money(hc.c)}</strong>
+              <span>Volume</span>
+              <strong>{compact(hc.v)}</strong>
             </div>
           </Tooltip>
         )}
@@ -257,7 +282,7 @@ export function CandleChart({ candles, height = 320, label }: { candles: Candle[
       <p className="chart-note">Hollow candles closed up, filled candles closed down.</p>
     </figure>
   );
-}
+});
 
 type BarGroup = { label: string; a: number; b: number };
 
@@ -294,10 +319,8 @@ export function GroupedBars({
     const y1 = y(v);
     const r = Math.min(4, Math.abs(y1 - y0), bw / 2);
     if (Math.abs(y1 - y0) < 0.5) return `M${x0},${y0}h${bw}`;
-    if (v >= 0) {
-      return `M${x0},${y0}V${y1 + r}Q${x0},${y1} ${x0 + r},${y1}H${x0 + bw - r}Q${x0 + bw},${y1} ${x0 + bw},${y1 + r}V${y0}Z`;
-    }
-    return `M${x0},${y0}V${y1 - r}Q${x0},${y1} ${x0 + r},${y1}H${x0 + bw - r}Q${x0 + bw},${y1} ${x0 + bw},${y1 - r}V${y0}Z`;
+    const edge = v >= 0 ? y1 + r : y1 - r;
+    return `M${x0},${y0}V${edge}Q${x0},${y1} ${x0 + r},${y1}H${x0 + bw - r}Q${x0 + bw},${y1} ${x0 + bw},${edge}V${y0}Z`;
   }
 
   const colors = { a: SERIES.primary, b: SERIES.benchmark };

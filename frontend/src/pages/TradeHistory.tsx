@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { Field } from "../components/Field";
 import { Badge, Card, DataState, SideBadge, SymbolMark } from "../components/ui";
-import { getActivity, getTradeHistory, listAssets } from "../data/service";
+import { getActivity, getTradeHistory } from "../data/service";
 import type { ExecutedTrade } from "../data/types";
-import { dateTime, money } from "../lib/format";
+import { dateTime, humanize, money } from "../lib/format";
 import { useAsync } from "../lib/hooks";
 import { useSession } from "../lib/session";
 
@@ -14,7 +14,7 @@ const SOURCE_LABEL: Record<ExecutedTrade["source"], string> = {
 };
 
 export function TradeHistory() {
-  const { settings } = useSession();
+  const { settings, assets } = useSession();
   const trades = useAsync(getTradeHistory, []);
   const activity = useAsync(() => getActivity(50), []);
   const [symbol, setSymbol] = useState("all");
@@ -37,7 +37,7 @@ export function TradeHistory() {
             <Field label="Symbol">
               <select value={symbol} onChange={(e) => setSymbol(e.target.value)}>
                 <option value="all">All symbols</option>
-                {listAssets().map((a) => (
+                {assets.map((a) => (
                   <option key={a.symbol} value={a.symbol}>
                     {a.symbol}
                   </option>
@@ -98,7 +98,7 @@ export function TradeHistory() {
                   {items.map((a) => (
                     <tr key={a.id}>
                       <td>{dateTime(a.time, settings.timezone)}</td>
-                      <td><Badge tone="neutral">{a.kind[0].toUpperCase() + a.kind.slice(1)}</Badge></td>
+                      <td><Badge tone="neutral">{humanize(a.kind)}</Badge></td>
                       <td><strong>{a.title}</strong></td>
                       <td className="muted">{a.detail}</td>
                     </tr>

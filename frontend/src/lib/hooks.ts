@@ -1,4 +1,5 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
+import { errorMessage } from "./format";
 
 export type AsyncState<T> = {
   data: T | undefined;
@@ -39,7 +40,7 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState
       })
       .catch((err: unknown) => {
         if (gen !== generation.current) return;
-        setError(err instanceof Error ? err.message : "Something went wrong");
+        setError(errorMessage(err));
       })
       .finally(() => {
         inFlight.current = null;
@@ -93,4 +94,30 @@ export function useWidth<T extends HTMLElement>(): [RefObject<T | null>, number]
     return () => observer.disconnect();
   }, []);
   return [ref, width];
+}
+
+export type SaveStatus = { tone: "success" | "danger"; text: string } | null;
+
+/**
+ * Runs a save and tracks its in-flight flag and outcome message. Returns the
+ * saved value, or undefined when the save failed (the error is in `status`).
+ */
+export function useSave() {
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<SaveStatus>(null);
+  const run = useCallback(async <T,>(save: () => Promise<T>, success: string | ((saved: T) => string)) => {
+    setSaving(true);
+    setStatus(null);
+    try {
+      const saved = await save();
+      setStatus({ tone: "success", text: typeof success === "string" ? success : success(saved) });
+      return saved;
+    } catch (err) {
+      setStatus({ tone: "danger", text: errorMessage(err, "Save failed") });
+      return undefined;
+    } finally {
+      setSaving(false);
+    }
+  }, []);
+  return { saving, status, setStatus, run };
 }

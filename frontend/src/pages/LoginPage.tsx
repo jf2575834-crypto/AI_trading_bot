@@ -5,7 +5,9 @@ import { Field } from "../components/Field";
 import { Icon } from "../components/Icon";
 import { Brand } from "../components/Layout";
 import { Badge, Notice, Segmented } from "../components/ui";
-import { dailyCandles } from "../data/market";
+import { getIndexHistory } from "../data/service";
+import { errorMessage, signedPct } from "../lib/format";
+import { useAsync } from "../lib/hooks";
 
 type Props = {
   onSignedIn: (user: User) => void;
@@ -49,7 +51,7 @@ export function LoginPage({ onSignedIn, notice }: Props) {
       if (isSignUp) await signUp(email.trim(), password);
       onSignedIn(await logIn(email.trim(), password, remember));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
+      setError(errorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -174,11 +176,14 @@ export function LoginPage({ onSignedIn, notice }: Props) {
   );
 }
 
+const wholeNumber = (v: number) => v.toFixed(0);
+
+/** Decorative illustration of the simulated index; it is fetched through the service like all data. */
 function HeroChart() {
-  const points = useMemo(() => {
-    const bars = dailyCandles("SPY").slice(-22);
-    return bars.map((b) => ({ t: b.t, value: b.c }));
-  }, []);
+  const history = useAsync(() => getIndexHistory(22), []);
+  const series = useMemo(() => (history.data ? [{ name: "Index", points: history.data, color: SERIES.primary }] : []), [history.data]);
+  const points = history.data;
+  if (!points || points.length < 2) return null;
   const change = ((points[points.length - 1].value - points[0].value) / points[0].value) * 100;
   return (
     <div className="card hero-chart">
@@ -186,17 +191,9 @@ function HeroChart() {
         <div className="card-titles">
           <h2 className="card-title">Simulated index, last month</h2>
         </div>
-        <Badge tone={change >= 0 ? "success" : "danger"}>
-          {change >= 0 ? "+" : "−"}
-          {Math.abs(change).toFixed(2)}%
-        </Badge>
+        <Badge tone={change >= 0 ? "success" : "danger"}>{signedPct(change, 2)}</Badge>
       </div>
-      <LineChart
-        label="Simulated index value over the last month"
-        height={170}
-        series={[{ name: "Index", points, color: SERIES.primary }]}
-        format={(v) => v.toFixed(0)}
-      />
+      <LineChart label="Simulated index value over the last month" height={170} series={series} format={wholeNumber} />
     </div>
   );
 }

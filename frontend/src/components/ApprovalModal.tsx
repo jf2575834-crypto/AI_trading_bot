@@ -2,21 +2,20 @@ import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { decideTrade } from "../data/service";
 import type { PendingTrade } from "../data/types";
-import { money } from "../lib/format";
+import { countdown, errorMessage, humanize, money, secondsLeft } from "../lib/format";
 import { useNow } from "../lib/hooks";
 import { Icon } from "./Icon";
-import { Badge, Modal, Notice, SideBadge, SymbolMark } from "./ui";
+import { Badge, Modal, Notice, RiskCheckBadge, SideBadge, SymbolMark } from "./ui";
 
 type Props = {
   trade: PendingTrade | null;
   onClose: () => void;
-  onDecided: () => void;
 };
 
-export function ApprovalModal({ trade, onClose, onDecided }: Props) {
+export function ApprovalModal({ trade, onClose }: Props) {
   return (
     <Modal open={trade !== null} onClose={onClose} labelledBy="approval-title" width={680}>
-      {trade && <ApprovalContent key={trade.id} trade={trade} onClose={onClose} onDecided={onDecided} />}
+      {trade && <ApprovalContent key={trade.id} trade={trade} onClose={onClose} />}
     </Modal>
   );
 }
@@ -28,23 +27,20 @@ const STATUS_COPY = {
   failed: { tone: "danger", text: "Approval failed. The order could not be placed; see notifications for the reason." },
 } as const;
 
-function ApprovalContent({ trade, onClose, onDecided }: { trade: PendingTrade; onClose: () => void; onDecided: () => void }) {
-  const now = useNow(250);
+function ApprovalContent({ trade, onClose }: { trade: PendingTrade; onClose: () => void }) {
+  const now = useNow(500);
   const navigate = useNavigate();
-  const [current, setCurrent] = useState(trade);
+  // Live proposal from the session until our own decision comes back.
+  const [result, setResult] = useState<PendingTrade | null>(null);
+  const current = result ?? trade;
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const deciding = useRef(false);
 
   // Countdown is driven by the server deadline; the server rejects late decisions regardless.
-  const msLeft = new Date(current.expiresAt).getTime() - now;
-  const expiredLocally = current.status === "pending" && msLeft <= 0;
-  const status = expiredLocally ? "expired" : current.status;
+  const secs = secondsLeft(current.expiresAt, now);
+  const status = current.status === "pending" && secs === 0 ? "expired" : current.status;
   const decided = status !== "pending";
-  const secs = Math.max(0, Math.ceil(msLeft / 1000));
-  const mm = String(Math.floor(secs / 60)).padStart(2, "0");
-  const ss = String(secs % 60).padStart(2, "0");
-
-  const deciding = useRef(false);
 
   async function decide(decision: "approve" | "reject") {
     if (deciding.current || decided) return;
@@ -52,18 +48,17 @@ function ApprovalContent({ trade, onClose, onDecided }: { trade: PendingTrade; o
     setBusy(decision);
     setError(null);
     try {
-      setCurrent(await decideTrade(current.id, decision));
+      setResult(await decideTrade(current.id, decision));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Decision failed");
+      setError(errorMessage(err, "Decision failed"));
     } finally {
       deciding.current = false;
       setBusy(null);
-      onDecided();
     }
   }
 
   function editAsOrder() {
-    const params = new URLSearchParams({ symbol: current.symbol, side: current.action, qty: String(current.quantity) });
+    const params = new URLSearchParams({ from: current.id, symbol: current.symbol, side: current.action, qty: String(current.quantity) });
     onClose();
     navigate(`/paper-trading?${params}`);
   }
@@ -82,7 +77,7 @@ function ApprovalContent({ trade, onClose, onDecided }: { trade: PendingTrade; o
       <p className="muted">Review this simulated strategy proposal before it expires.</p>
 
       {decided ? (
-        <Notice tone={STATUS_COPY[status].tone} title={status[0].toUpperCase() + status.slice(1)}>
+        <Notice tone={STATUS_COPY[status].tone} title={humanize(status)}>
           {STATUS_COPY[status].text}
         </Notice>
       ) : (
@@ -91,7 +86,7 @@ function ApprovalContent({ trade, onClose, onDecided }: { trade: PendingTrade; o
           <div>
             <span className="eyebrow">Decision countdown</span>
             <strong className="countdown-time" aria-label={`${secs} seconds left`}>
-              {mm}:{ss}
+              {countdown(secs)}
             </strong>
           </div>
           <div className="countdown-default">
@@ -128,9 +123,7 @@ function ApprovalContent({ trade, onClose, onDecided }: { trade: PendingTrade; o
       <div className={`risk-result ${current.riskCheck.passed ? "pass" : "fail"}`}>
         <Icon name={current.riskCheck.passed ? "shieldCheck" : "alert"} size={22} />
         <div>
-          <Badge tone={current.riskCheck.passed ? "success" : "danger"}>
-            {current.riskCheck.passed ? "Risk check passed" : "Risk check failed"}
-          </Badge>
+          <RiskCheckBadge passed={current.riskCheck.passed} />
           <strong>{current.riskCheck.summary}</strong>
           <span className="muted small">{current.riskCheck.details}</span>
         </div>

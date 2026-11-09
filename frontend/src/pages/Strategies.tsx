@@ -1,13 +1,15 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Ring } from "../components/charts";
 import { Field } from "../components/Field";
 import { Icon, type IconName } from "../components/Icon";
-import { Badge, Card, DataState, ErrorState, Notice, Skeleton, Tabs, Toggle } from "../components/ui";
+import { RECOMMENDATION_TONES } from "../components/tones";
+import { Badge, Card, DataState, ErrorState, IconTile, Notice, SaveStatus, StatusBadge, Tabs, Toggle } from "../components/ui";
 import { DEFAULT_RISK, getAnalysis, getRisk, getStrategies, saveRisk, saveStrategy } from "../data/service";
-import type { ParamDef, RiskSettings, Strategy, StrategyKind } from "../data/types";
-import { dateTime } from "../lib/format";
-import { useAsync } from "../lib/hooks";
+import { hasErrors, parseNumber, parseSymbols, validateParams, validateRisk } from "../data/rules";
+import type { RiskSettings, Strategy, StrategyKind } from "../data/types";
+import { dateTime, errorMessage } from "../lib/format";
+import { useAsync, useSave } from "../lib/hooks";
 import { useSession } from "../lib/session";
 
 type Tab = StrategyKind | "ai";
@@ -99,7 +101,7 @@ function StrategyCard({ strategy, onSaved }: { strategy: Strategy; onSaved: (s: 
     try {
       onSaved(await saveStrategy({ ...strategy, enabled }));
     } catch (err) {
-      setToggleError(err instanceof Error ? err.message : "Couldn't update strategy");
+      setToggleError(errorMessage(err, "Couldn't update strategy"));
     } finally {
       setToggling(false);
     }
@@ -108,9 +110,7 @@ function StrategyCard({ strategy, onSaved }: { strategy: Strategy; onSaved: (s: 
   return (
     <article className={`card strategy ${open ? "open" : ""}`}>
       <header className="strategy-head">
-        <span className={`icon-tile tone-${strategy.enabled ? "success" : "neutral"}`}>
-          <Icon name={STRATEGY_ICON[strategy.id] ?? "sliders"} />
-        </span>
+        <IconTile name={STRATEGY_ICON[strategy.id] ?? "sliders"} tone={strategy.enabled ? "success" : "neutral"} />
         <div className="strategy-text">
           <h4>{strategy.name}</h4>
           <p className="muted small">{strategy.description}</p>
@@ -125,14 +125,7 @@ function StrategyCard({ strategy, onSaved }: { strategy: Strategy; onSaved: (s: 
         </div>
       </header>
       {toggleError && <ErrorState message={toggleError} compact />}
-      {open && (
-        <ParamForm
-          strategy={strategy}
-          onSaved={(s) => {
-            onSaved(s);
-          }}
-        />
-      )}
+      {open && <ParamForm strategy={strategy} onSaved={onSaved} />}
       <footer className="strategy-foot muted small">
         Version {strategy.version} · last saved {dateTime(strategy.updatedAt, settings.timezone)}
       </footer>
@@ -143,67 +136,34 @@ function StrategyCard({ strategy, onSaved }: { strategy: Strategy; onSaved: (s: 
 type Draft = Record<string, string>;
 
 function toDraft(s: Strategy): Draft {
-  return Object.fromEntries(
-    s.paramDefs.map((d) => [d.key, Array.isArray(s.params[d.key]) ? (s.params[d.key] as string[]).join(", ") : String(s.params[d.key] ?? "")]),
-  );
-}
-
-function validateParam(def: ParamDef, raw: string): string | undefined {
-  if (def.kind === "symbols") {
-    const list = raw.split(",").map((x) => x.trim()).filter(Boolean);
-    const bad = list.find((x) => !/^[A-Za-z]{1,5}$/.test(x));
-    return bad ? `"${bad}" is not a valid ticker` : undefined;
-  }
-  if (raw.trim() === "") return "Required";
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return "Enter a number";
-  if (def.kind === "int" && !Number.isInteger(n)) return "Enter a whole number";
-  if (def.min !== undefined && n < def.min) return `Must be at least ${def.min}`;
-  if (def.max !== undefined && n > def.max) return `Must be at most ${def.max}`;
-  return undefined;
+  return Object.fromEntries(s.paramDefs.map((d) => {
+    const v = s.params[d.key];
+    return [d.key, Array.isArray(v) ? v.join(", ") : String(v ?? "")];
+  }));
 }
 
 function ParamForm({ strategy, onSaved }: { strategy: Strategy; onSaved: (s: Strategy) => void }) {
-  const [draft, setDraft] = useState<Draft>(() => toDraft(strategy));
+  const initial = useMemo(() => toDraft(strategy), [strategy]);
+  const [draft, setDraft] = useState<Draft>(initial);
   const [touched, setTouched] = useState(false);
-  const [status, setStatus] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
-  const [saving, setSaving] = useState(false);
+  const { saving, status, run } = useSave();
 
-  useEffect(() => setDraft(toDraft(strategy)), [strategy]);
+  useEffect(() => setDraft(initial), [initial]);
 
-  const errors: Record<string, string | undefined> = {};
-  for (const def of strategy.paramDefs) errors[def.key] = validateParam(def, draft[def.key] ?? "");
-  if (strategy.id === "ma-crossover" && !errors.longWindow && !errors.shortWindow && Number(draft.longWindow) <= Number(draft.shortWindow)) {
-    errors.longWindow = "Must be greater than the fast period";
-  }
-  if (strategy.id === "rsi" && !errors.overbought && !errors.oversold && Number(draft.overbought) <= Number(draft.oversold)) {
-    errors.overbought = "Must be greater than the oversold level";
-  }
-  const hasErrors = Object.values(errors).some(Boolean);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(toDraft(strategy));
+  const errors = validateParams(strategy.paramDefs, draft);
+  const dirty = strategy.paramDefs.some((d) => draft[d.key] !== initial[d.key]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setTouched(true);
-    setStatus(null);
-    if (hasErrors) return;
-    setSaving(true);
-    const params: Strategy["params"] = {};
-    for (const def of strategy.paramDefs) {
-      params[def.key] =
-        def.kind === "symbols"
-          ? draft[def.key].split(",").map((x) => x.trim().toUpperCase()).filter(Boolean)
-          : Number(draft[def.key]);
-    }
-    try {
-      const saved = await saveStrategy({ ...strategy, params });
+    if (hasErrors(errors)) return;
+    const params: Strategy["params"] = Object.fromEntries(
+      strategy.paramDefs.map((d) => [d.key, d.kind === "symbols" ? parseSymbols(draft[d.key]) : parseNumber(draft[d.key])]),
+    );
+    const saved = await run(() => saveStrategy({ ...strategy, params }), (s) => `Saved as version ${s.version}.`);
+    if (saved) {
       onSaved(saved);
-      setStatus({ tone: "success", text: `Saved as version ${saved.version}.` });
       setTouched(false);
-    } catch (err) {
-      setStatus({ tone: "danger", text: err instanceof Error ? err.message : "Save failed" });
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -217,7 +177,7 @@ function ParamForm({ strategy, onSaved }: { strategy: Strategy; onSaved: (s: Str
       </div>
       <div className="form-grid two">
         {strategy.paramDefs.map((def) => (
-          <Field key={def.key} label={def.label} hint={def.hint} error={touched || draft[def.key] !== toDraft(strategy)[def.key] ? errors[def.key] : undefined}>
+          <Field key={def.key} label={def.label} hint={def.hint} error={touched || draft[def.key] !== initial[def.key] ? errors[def.key] : undefined}>
             <input
               inputMode={def.kind === "int" ? "numeric" : def.kind === "decimal" ? "decimal" : "text"}
               value={draft[def.key] ?? ""}
@@ -227,12 +187,8 @@ function ParamForm({ strategy, onSaved }: { strategy: Strategy; onSaved: (s: Str
         ))}
       </div>
       <div className="form-actions">
-        {status && (
-          <span className={`save-status ${status.tone}`} role="status">
-            <Icon name={status.tone === "success" ? "check" : "alert"} size={14} /> {status.text}
-          </span>
-        )}
-        <button type="button" className="btn btn-ghost" disabled={!dirty || saving} onClick={() => setDraft(toDraft(strategy))}>
+        <SaveStatus status={status} />
+        <button type="button" className="btn btn-ghost" disabled={!dirty || saving} onClick={() => setDraft(initial)}>
           Discard
         </button>
         <button type="submit" className="btn btn-primary" disabled={!dirty || saving}>
@@ -243,156 +199,121 @@ function ParamForm({ strategy, onSaved }: { strategy: Strategy; onSaved: (s: Str
   );
 }
 
-type RiskDraft = Record<"maxPositionSize" | "maxExposurePct" | "stopLossPct" | "takeProfitPct" | "dailyLossLimit", string> & {
-  approvalRequired: boolean;
-};
+const RISK_FIELDS = ["maxPositionSize", "maxExposurePct", "stopLossPct", "takeProfitPct", "dailyLossLimit"] as const;
+type RiskField = (typeof RISK_FIELDS)[number];
+type RiskDraft = Record<RiskField, string> & { approvalRequired: boolean };
 
 function riskDraft(r: Omit<RiskSettings, "version" | "updatedAt">): RiskDraft {
-  return {
-    maxPositionSize: String(r.maxPositionSize),
-    maxExposurePct: String(r.maxExposurePct),
-    stopLossPct: String(r.stopLossPct),
-    takeProfitPct: String(r.takeProfitPct),
-    dailyLossLimit: String(r.dailyLossLimit),
-    approvalRequired: r.approvalRequired,
-  };
+  const fields = Object.fromEntries(RISK_FIELDS.map((k) => [k, String(r[k])])) as Record<RiskField, string>;
+  return { ...fields, approvalRequired: r.approvalRequired };
 }
 
-function validateRisk(d: RiskDraft) {
-  const n = (k: keyof RiskDraft) => Number(d[k]);
-  const e: Partial<Record<keyof RiskDraft, string>> = {};
-  if (!(n("maxPositionSize") > 0)) e.maxPositionSize = "Enter an amount greater than 0";
-  if (!(n("maxExposurePct") > 0 && n("maxExposurePct") <= 100)) e.maxExposurePct = "Enter 1 to 100";
-  if (!(n("stopLossPct") > 0 && n("stopLossPct") <= 50)) e.stopLossPct = "Enter above 0, up to 50";
-  if (!(n("takeProfitPct") > 0 && n("takeProfitPct") <= 500)) e.takeProfitPct = "Enter above 0, up to 500";
-  else if (!e.stopLossPct && n("takeProfitPct") <= n("stopLossPct")) e.takeProfitPct = "Usually larger than the stop loss";
-  if (!(n("dailyLossLimit") > 0)) e.dailyLossLimit = "Enter an amount greater than 0";
-  return e;
+function riskValues(d: RiskDraft): Record<RiskField, number> {
+  return Object.fromEntries(RISK_FIELDS.map((k) => [k, parseNumber(d[k])])) as Record<RiskField, number>;
 }
 
-function riskProfile(d: RiskDraft): { label: string; level: number; color: string; text: string } {
-  const score = Number(d.maxExposurePct) / 100 * 0.6 + Math.min(Number(d.stopLossPct), 20) / 20 * 0.4;
-  if (score < 0.45) return { label: "Low", level: score * 100, color: "#22c55e", text: "Current settings prioritize capital protection." };
-  if (score < 0.7) return { label: "Medium", level: score * 100, color: "#eab308", text: "Balanced between growth and protection." };
-  return { label: "High", level: Math.min(100, score * 100), color: "#ef4444", text: "Settings allow large exposure and wide stops." };
+const PROFILES = [
+  { upTo: 0.45, short: "LOW", name: "Conservative", color: "#22c55e", text: "Current settings prioritize capital protection." },
+  { upTo: 0.7, short: "MED", name: "Moderate", color: "#eab308", text: "Balanced between growth and protection." },
+  { upTo: Infinity, short: "HIGH", name: "Aggressive", color: "#ef4444", text: "Settings allow large exposure and wide stops." },
+];
+
+function riskProfile(v: Record<RiskField, number>) {
+  const score = (v.maxExposurePct / 100) * 0.6 + (Math.min(v.stopLossPct, 20) / 20) * 0.4;
+  const profile = PROFILES.find((p) => score < p.upTo) ?? PROFILES[PROFILES.length - 1];
+  return { ...profile, level: Math.min(100, score * 100) };
 }
 
 function RiskPanel() {
-  const { settings } = useSession();
   const risk = useAsync(getRisk, []);
-  const [draft, setDraft] = useState<RiskDraft | null>(null);
+  return (
+    <Card title="Risk Settings" subtitle="Global limits for every active strategy" icon="shield" className="risk-panel">
+      <DataState state={risk} rows={6}>
+        {(r) => <RiskForm risk={r} onSaved={risk.setData} />}
+      </DataState>
+    </Card>
+  );
+}
+
+function RiskForm({ risk, onSaved }: { risk: RiskSettings; onSaved: (r: RiskSettings) => void }) {
+  const { settings } = useSession();
+  const [draft, setDraft] = useState(() => riskDraft(risk));
   const [touched, setTouched] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [status, setStatus] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
+  const { saving, status, setStatus, run } = useSave();
 
-  useEffect(() => {
-    if (risk.data) setDraft(riskDraft(risk.data));
-  }, [risk.data]);
-
-  if (!risk.data || !draft) {
-    return (
-      <Card title="Risk Settings" icon="shield">
-        {risk.error ? <ErrorState message={risk.error} onRetry={risk.reload} /> : <Skeleton rows={6} />}
-      </Card>
-    );
-  }
-
-  const errors = validateRisk(draft);
-  const hasErrors = Object.keys(errors).length > 0;
-  const profile = riskProfile(draft);
+  const values = riskValues(draft);
+  const errors = validateRisk(values);
+  const profile = riskProfile(values);
   const set = (k: keyof RiskDraft, v: string | boolean) => {
     setDraft({ ...draft, [k]: v });
     setStatus(null);
   };
+  const err = (k: RiskField) => (touched ? errors[k] : undefined);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setTouched(true);
-    if (hasErrors || !risk.data || !draft) return;
-    setSaving(true);
-    try {
-      const saved = await saveRisk({
-        ...risk.data,
-        maxPositionSize: Number(draft.maxPositionSize),
-        maxExposurePct: Number(draft.maxExposurePct),
-        stopLossPct: Number(draft.stopLossPct),
-        takeProfitPct: Number(draft.takeProfitPct),
-        dailyLossLimit: Number(draft.dailyLossLimit),
-        approvalRequired: draft.approvalRequired,
-      });
-      risk.setData(saved);
-      setStatus({ tone: "success", text: `Saved as version ${saved.version}.` });
+    if (hasErrors(errors)) return;
+    const saved = await run(() => saveRisk({ ...risk, ...values, approvalRequired: draft.approvalRequired }), (r) => `Saved as version ${r.version}.`);
+    if (saved) {
+      onSaved(saved);
       setTouched(false);
-    } catch (err) {
-      setStatus({ tone: "danger", text: err instanceof Error ? err.message : "Save failed" });
-    } finally {
-      setSaving(false);
     }
   }
 
-  const err = (k: keyof RiskDraft) => (touched ? errors[k] : undefined);
-
   return (
-    <Card title="Risk Settings" subtitle="Global limits for every active strategy" icon="shield" className="risk-panel">
-      <form onSubmit={submit} noValidate className="stack-sm">
-        <div className="risk-profile">
-          <Ring value={profile.level} color={profile.color} size={58}>
-            <span className="ring-short">{profile.label === "Medium" ? "MED" : profile.label.toUpperCase()}</span>
-          </Ring>
-          <div>
-            <strong>{profile.label === "Low" ? "Conservative" : profile.label === "Medium" ? "Moderate" : "Aggressive"} risk profile</strong>
-            <span className="muted small">{profile.text}</span>
-          </div>
+    <form onSubmit={submit} noValidate className="stack-sm">
+      <div className="risk-profile">
+        <Ring value={profile.level} color={profile.color} size={58}>
+          <span className="ring-short">{profile.short}</span>
+        </Ring>
+        <div>
+          <strong>{profile.name} risk profile</strong>
+          <span className="muted small">{profile.text}</span>
         </div>
+      </div>
 
-        <Field label="Max position size ($)" error={err("maxPositionSize")} hint="Maximum value of a single position">
-          <input inputMode="decimal" value={draft.maxPositionSize} onChange={(e) => set("maxPositionSize", e.target.value)} />
+      <Field label="Max position size ($)" error={err("maxPositionSize")} hint="Maximum value of a single position">
+        <input inputMode="decimal" value={draft.maxPositionSize} onChange={(e) => set("maxPositionSize", e.target.value)} />
+      </Field>
+      <div className="form-grid two">
+        <Field label="Portfolio exposure limit (%)" error={err("maxExposurePct")}>
+          <input inputMode="decimal" value={draft.maxExposurePct} onChange={(e) => set("maxExposurePct", e.target.value)} />
         </Field>
-        <div className="form-grid two">
-          <Field label="Portfolio exposure limit (%)" error={err("maxExposurePct")}>
-            <input inputMode="decimal" value={draft.maxExposurePct} onChange={(e) => set("maxExposurePct", e.target.value)} />
-          </Field>
-          <Field label="Stop loss (%)" error={err("stopLossPct")}>
-            <input inputMode="decimal" value={draft.stopLossPct} onChange={(e) => set("stopLossPct", e.target.value)} />
-          </Field>
-          <Field label="Take profit (%)" error={err("takeProfitPct")}>
-            <input inputMode="decimal" value={draft.takeProfitPct} onChange={(e) => set("takeProfitPct", e.target.value)} />
-          </Field>
-          <Field label="Daily loss limit ($)" error={err("dailyLossLimit")}>
-            <input inputMode="decimal" value={draft.dailyLossLimit} onChange={(e) => set("dailyLossLimit", e.target.value)} />
-          </Field>
-        </div>
+        <Field label="Stop loss (%)" error={err("stopLossPct")}>
+          <input inputMode="decimal" value={draft.stopLossPct} onChange={(e) => set("stopLossPct", e.target.value)} />
+        </Field>
+        <Field label="Take profit (%)" error={err("takeProfitPct")}>
+          <input inputMode="decimal" value={draft.takeProfitPct} onChange={(e) => set("takeProfitPct", e.target.value)} />
+        </Field>
+        <Field label="Daily loss limit ($)" error={err("dailyLossLimit")}>
+          <input inputMode="decimal" value={draft.dailyLossLimit} onChange={(e) => set("dailyLossLimit", e.target.value)} />
+        </Field>
+      </div>
 
-        <div className="toggle-row">
-          <div>
-            <strong>Trade approval required</strong>
-            <span className="muted small">Manually approve each strategy-generated trade before execution.</span>
-          </div>
-          <Toggle label="Trade approval required" checked={draft.approvalRequired} onChange={(v) => set("approvalRequired", v)} />
+      <div className="toggle-row">
+        <div>
+          <strong>Trade approval required</strong>
+          <span className="muted small">Manually approve each strategy-generated trade before execution.</span>
         </div>
+        <Toggle label="Trade approval required" checked={draft.approvalRequired} onChange={(v) => set("approvalRequired", v)} />
+      </div>
 
-        <Notice tone="info">
-          Limits are enforced by the trading engine on every order, not only by this form. These settings apply to paper trading only.
-        </Notice>
+      <Notice tone="info">Limits are enforced by the trading engine on every order, not only by this form. These settings apply to paper trading only.</Notice>
 
-        {status && (
-          <span className={`save-status ${status.tone}`} role="status">
-            <Icon name={status.tone === "success" ? "check" : "alert"} size={14} /> {status.text}
-          </span>
-        )}
-        <div className="button-row">
-          <button type="button" className="btn btn-secondary" onClick={() => setDraft(riskDraft(DEFAULT_RISK))}>
-            Reset to defaults
-          </button>
-          <button type="submit" className="btn btn-primary" disabled={saving}>
-            <Icon name="check" size={16} /> {saving ? "Saving…" : "Save settings"}
-          </button>
-        </div>
-        <p className="muted small">
-          Version {risk.data.version} · last saved {dateTime(risk.data.updatedAt, settings.timezone)}
-        </p>
-      </form>
-    </Card>
+      <SaveStatus status={status} />
+      <div className="button-row">
+        <button type="button" className="btn btn-secondary" onClick={() => setDraft(riskDraft(DEFAULT_RISK))}>
+          Reset to defaults
+        </button>
+        <button type="submit" className="btn btn-primary" disabled={saving}>
+          <Icon name="check" size={16} /> {saving ? "Saving…" : "Save settings"}
+        </button>
+      </div>
+      <p className="muted small">
+        Version {risk.version} · last saved {dateTime(risk.updatedAt, settings.timezone)}
+      </p>
+    </form>
   );
 }
 
@@ -412,18 +333,30 @@ function AiRecommendations({ strategies }: { strategies: Strategy[] }) {
         isEmpty={(r) => r.length === 0}
         empty={
           <>
-            No analyses yet. <Link to="/ai-analysis" className="link-btn">Run an AI analysis</Link>
+            No analyses yet.{" "}
+            <Link to="/ai-analysis" className="link-btn">
+              Run an AI analysis
+            </Link>
           </>
         }
       >
         {(list) =>
           list.map((r) => (
-            <Card key={r!.id} title={r!.strategyName} subtitle={`${r!.recommendations.length} recommendations`} actions={<Link className="link-btn" to="/ai-analysis">Open analysis</Link>}>
+            <Card
+              key={r.id}
+              title={r.strategyName}
+              subtitle={`${r.recommendations.length} recommendations`}
+              actions={
+                <Link className="link-btn" to="/ai-analysis">
+                  Open analysis
+                </Link>
+              }
+            >
               <ul className="rec-list">
-                {r!.recommendations.map((rec) => (
+                {r.recommendations.map((rec) => (
                   <li key={rec.id}>
                     <span>{rec.title}</span>
-                    <RecStatus status={rec.status} />
+                    <StatusBadge status={rec.status} tones={RECOMMENDATION_TONES} />
                   </li>
                 ))}
               </ul>
@@ -433,9 +366,4 @@ function AiRecommendations({ strategies }: { strategies: Strategy[] }) {
       </DataState>
     </>
   );
-}
-
-export function RecStatus({ status }: { status: string }) {
-  const tone = status === "accepted" ? "success" : status === "rejected" ? "danger" : status === "testing" ? "warning" : "info";
-  return <Badge tone={tone}>{status[0].toUpperCase() + status.slice(1)}</Badge>;
 }

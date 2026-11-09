@@ -1,36 +1,38 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { CandleChart } from "../components/charts";
 import { Field } from "../components/Field";
 import { Icon } from "../components/Icon";
-import { Badge, Card, DataState, ErrorState, Notice, Segmented, SideBadge, SymbolMark, Tabs } from "../components/ui";
-import {
-  type CandleRange,
-  cancelOrder,
-  getCandles,
-  getOrders,
-  getPortfolio,
-  getPositions,
-  getQuote,
-  getWatchlist,
-  listAssets,
-  submitOrder,
-} from "../data/service";
-import type { Order, OrderStatus, OrderType, Quote, Side } from "../data/types";
-import { compact, dateTime, money, signedMoney, signedPct, timeOnly, tone } from "../lib/format";
+import { PositionsTable } from "../components/PositionsTable";
+import { ORDER_TONES } from "../components/tones";
+import { Badge, Card, DataState, ErrorState, Notice, Segmented, SideBadge, StatusBadge, SymbolMark, Tabs } from "../components/ui";
+import { type CandleRange, cancelOrder, getCandles, getOrders, getPortfolio, getPositions, getWatchlist, submitOrder } from "../data/service";
+import type { Candle, Order, OrderType, Position, Quote, Side } from "../data/types";
+import { compact, dateTime, errorMessage, money, signedPct, timeOnly, tone } from "../lib/format";
 import { type AsyncState, useAsync, useVisibleInterval } from "../lib/hooks";
 import { useSession } from "../lib/session";
 
 const RANGES: CandleRange[] = ["1M", "3M", "6M", "1Y"];
 
+const isOpen = (o: Order) => o.status === "pending" || o.status === "accepted";
+
 export function PaperTrading() {
+  // Prefill from "Edit as manual order": ?from=<proposal>&symbol=&side=&qty=
   const [params] = useSearchParams();
-  const initialSymbol = (params.get("symbol") ?? "AAPL").toUpperCase();
-  const [selected, setSelected] = useState(initialSymbol);
+  const prefill = {
+    key: params.get("from") ?? "manual",
+    symbol: (params.get("symbol") ?? "AAPL").toUpperCase(),
+    side: (params.get("side") === "SELL" ? "SELL" : "BUY") as Side,
+    qty: params.get("qty") ?? "",
+  };
+  const [selected, setSelected] = useState(prefill.symbol);
+  useEffect(() => setSelected(prefill.symbol), [prefill.symbol]);
+
   const [range, setRange] = useState<CandleRange>("1M");
   const watchlist = useAsync(getWatchlist, []);
   const candles = useAsync(() => getCandles(selected, range), [selected, range]);
   const orders = useAsync(getOrders, []);
+  const positions = useAsync(getPositions, []);
   useVisibleInterval(() => void watchlist.reload(), 15000);
 
   const quote = watchlist.data?.find((q) => q.symbol === selected);
@@ -42,20 +44,14 @@ export function PaperTrading() {
       </Notice>
 
       <div className="trade-grid">
-        <Watchlist
-          state={watchlist}
-          selected={selected}
-          onSelect={(s) => setSelected(s)}
-        />
+        <Watchlist state={watchlist} selected={selected} onSelect={setSelected} />
 
         <Card className="chart-card">
           <div className="quote-head">
             <SymbolMark symbol={selected} size={36} />
             <div>
               <strong className="quote-symbol">{selected}</strong>
-              <span className="muted small">
-                {quote ? `${quote.name} · ${quote.exchange}` : ""}
-              </span>
+              <span className="muted small">{quote ? `${quote.name} · ${quote.exchange}` : ""}</span>
             </div>
             <div className="quote-price">
               {quote && (
@@ -70,44 +66,52 @@ export function PaperTrading() {
             <Segmented label="Chart range" value={range} onChange={setRange} options={RANGES} />
           </div>
           <DataState state={candles} rows={8}>
-            {(c) => (
-              <>
-                <CandleChart candles={c} label={`${selected} daily candles, ${range}`} />
-                <dl className="ohlc">
-                  <div><dt>Last close</dt><dd>{money(c[c.length - 1].c)}</dd></div>
-                  <div><dt>{range} high</dt><dd>{money(Math.max(...c.map((x) => x.h)))}</dd></div>
-                  <div><dt>{range} low</dt><dd>{money(Math.min(...c.map((x) => x.l)))}</dd></div>
-                  <div><dt>Last volume</dt><dd>{compact(c[c.length - 1].v)}</dd></div>
-                </dl>
-              </>
-            )}
+            {(c) => <CandlePanel candles={c} label={`${selected} daily candles, ${range}`} range={range} />}
           </DataState>
         </Card>
 
         <OrderTicket
-          key={initialSymbol + (params.get("qty") ?? "")}
+          key={prefill.key}
           symbol={selected}
-          onSymbol={(s) => setSelected(s)}
-          initialSide={(params.get("side") as Side) ?? "BUY"}
-          initialQty={params.get("qty") ?? ""}
-          onSubmitted={() => void orders.reload()}
+          onSymbol={setSelected}
+          initialSide={prefill.side}
+          initialQty={prefill.qty}
+          quotes={watchlist.data ?? []}
+          positions={positions.data}
+          onSubmitted={() => {
+            void orders.reload();
+            void positions.reload();
+          }}
         />
       </div>
 
-      <OrdersPanel state={orders} />
+      <OrdersPanel orders={orders} positions={positions} />
     </div>
   );
 }
 
-function Watchlist({
-  state,
-  selected,
-  onSelect,
-}: {
-  state: AsyncState<Quote[]>;
-  selected: string;
-  onSelect: (s: string) => void;
-}) {
+function CandlePanel({ candles, label, range }: { candles: Candle[]; label: string; range: CandleRange }) {
+  const last = candles[candles.length - 1];
+  let high = -Infinity;
+  let low = Infinity;
+  for (const c of candles) {
+    high = Math.max(high, c.h);
+    low = Math.min(low, c.l);
+  }
+  return (
+    <>
+      <CandleChart candles={candles} label={label} />
+      <dl className="ohlc">
+        <div><dt>Last close</dt><dd>{money(last.c)}</dd></div>
+        <div><dt>{range} high</dt><dd>{money(high)}</dd></div>
+        <div><dt>{range} low</dt><dd>{money(low)}</dd></div>
+        <div><dt>Last volume</dt><dd>{compact(last.v)}</dd></div>
+      </dl>
+    </>
+  );
+}
+
+function Watchlist({ state, selected, onSelect }: { state: AsyncState<Quote[]>; selected: string; onSelect: (s: string) => void }) {
   const [query, setQuery] = useState("");
   return (
     <Card title="Watchlist" subtitle={state.data ? `${state.data.length} tracked symbols` : undefined} actions={<Badge tone="success" dot>Demo feed</Badge>}>
@@ -148,29 +152,27 @@ function Watchlist({
   );
 }
 
-type TicketState = "editing" | "review" | "submitting" | "done";
+type TicketStage = "editing" | "review" | "submitting" | "done";
 
-function OrderTicket({
-  symbol,
-  onSymbol,
-  initialSide,
-  initialQty,
-  onSubmitted,
-}: {
+type TicketProps = {
   symbol: string;
   onSymbol: (s: string) => void;
   initialSide: Side;
   initialQty: string;
+  quotes: Quote[];
+  positions: Position[] | undefined;
   onSubmitted: () => void;
-}) {
-  const { settings } = useSession();
-  const [side, setSide] = useState<Side>(initialSide === "SELL" ? "SELL" : "BUY");
+};
+
+function OrderTicket({ symbol, onSymbol, initialSide, initialQty, quotes, positions, onSubmitted }: TicketProps) {
+  const { settings, assets } = useSession();
+  const [side, setSide] = useState<Side>(initialSide);
   const [symbolText, setSymbolText] = useState(symbol);
   const [orderType, setOrderType] = useState<OrderType>("market");
   const [qty, setQty] = useState(initialQty);
   const [limit, setLimit] = useState("");
   const [touched, setTouched] = useState(false);
-  const [stage, setStage] = useState<TicketState>("editing");
+  const [stage, setStage] = useState<TicketStage>("editing");
   const [idempotencyKey, setKey] = useState(() => crypto.randomUUID());
   const [result, setResult] = useState<Order | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -179,24 +181,21 @@ function OrderTicket({
   useEffect(() => setSymbolText(symbol), [symbol]);
 
   const sym = symbolText.trim().toUpperCase();
-  const known = listAssets().some((a) => a.symbol === sym);
-  const quote = useAsync(() => (known ? getQuote(sym) : Promise.resolve(null)), [sym, known]);
+  const known = assets.some((a) => a.symbol === sym);
+  const quote = quotes.find((q) => q.symbol === sym);
+  const held = positions && known ? (positions.find((p) => p.symbol === sym)?.quantity ?? 0) : undefined;
   const cash = useAsync(() => getPortfolio().then((p) => p.availableCash), [result?.id]);
-  const held = useAsync(() => getPositions().then((ps) => ps.find((p) => p.symbol === sym)?.quantity ?? 0), [sym, result?.id]);
 
-  const price = orderType === "limit" && Number(limit) > 0 ? Number(limit) : quote.data?.price ?? 0;
+  const price = orderType === "limit" && Number(limit) > 0 ? Number(limit) : (quote?.price ?? 0);
   const estCost = price * Number(qty || 0);
 
-  const errors = useMemo(() => {
-    const e: { symbol?: string; qty?: string; limit?: string } = {};
-    if (!/^[A-Z]{1,5}$/.test(sym)) e.symbol = "Enter a ticker of 1 to 5 letters";
-    else if (!known) e.symbol = `${sym} is not available in the demo market`;
-    const q = Number(qty);
-    if (!(q > 0) || !Number.isInteger(q)) e.qty = "Enter a whole number greater than 0";
-    else if (side === "SELL" && held.data !== undefined && q > held.data) e.qty = `You hold ${held.data} ${sym}`;
-    if (orderType === "limit" && !(Number(limit) > 0)) e.limit = "Enter a limit price greater than 0";
-    return e;
-  }, [sym, known, qty, side, held.data, orderType, limit]);
+  const errors: { symbol?: string; qty?: string; limit?: string } = {};
+  if (!/^[A-Z]{1,5}$/.test(sym)) errors.symbol = "Enter a ticker of 1 to 5 letters";
+  else if (!known) errors.symbol = `${sym} is not available in the demo market`;
+  const q = Number(qty);
+  if (!(q > 0) || !Number.isInteger(q)) errors.qty = "Enter a whole number greater than 0";
+  else if (side === "SELL" && held !== undefined && q > held) errors.qty = `You hold ${held} ${sym}`;
+  if (orderType === "limit" && !(Number(limit) > 0)) errors.limit = "Enter a limit price greater than 0";
   const valid = Object.keys(errors).length === 0;
 
   function edit() {
@@ -209,7 +208,7 @@ function OrderTicket({
     e.preventDefault();
     setTouched(true);
     if (!valid) return;
-    if (known) onSymbol(sym);
+    onSymbol(sym);
     setKey(crypto.randomUUID());
     setStage("review");
   }
@@ -221,20 +220,11 @@ function OrderTicket({
     setStage("submitting");
     setSubmitError(null);
     try {
-      const order = await submitOrder({
-        symbol: sym,
-        side,
-        quantity: Number(qty),
-        orderType,
-        limitPrice: orderType === "limit" ? Number(limit) : null,
-        idempotencyKey,
-      });
-      setResult(order);
-      setStage("done");
+      setResult(await submitOrder({ symbol: sym, side, quantity: q, orderType, limitPrice: orderType === "limit" ? Number(limit) : null, idempotencyKey }));
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Order failed");
-      setStage("done");
+      setSubmitError(errorMessage(err, "Order failed"));
     } finally {
+      setStage("done");
       submitting.current = false;
       onSubmitted();
     }
@@ -259,7 +249,7 @@ function OrderTicket({
           <input value={symbolText} disabled={locked} onChange={(e) => setSymbolText(e.target.value.toUpperCase())} list="symbols" autoComplete="off" />
         </Field>
         <datalist id="symbols">
-          {listAssets().map((a) => (
+          {assets.map((a) => (
             <option key={a.symbol} value={a.symbol}>
               {a.name}
             </option>
@@ -271,7 +261,7 @@ function OrderTicket({
             <option value="limit">Limit</option>
           </select>
         </Field>
-        <Field label="Quantity (shares)" error={touched ? errors.qty : undefined} hint={side === "SELL" && held.data !== undefined ? `You hold ${held.data}` : undefined}>
+        <Field label="Quantity (shares)" error={touched ? errors.qty : undefined} hint={side === "SELL" && held !== undefined ? `You hold ${held}` : undefined}>
           <input inputMode="numeric" value={qty} disabled={locked} onChange={(e) => setQty(e.target.value)} />
         </Field>
         {orderType === "limit" && (
@@ -284,8 +274,8 @@ function OrderTicket({
           <div>
             <dt>Estimated price</dt>
             <dd>
-              {quote.data ? money(quote.data.price) : "—"}
-              {quote.data && <span className="muted small"> as of {timeOnly(quote.data.asOf, settings.timezone)}</span>}
+              {quote ? money(quote.price) : "—"}
+              {quote && <span className="muted small"> as of {timeOnly(quote.asOf, settings.timezone)}</span>}
             </dd>
           </div>
           <div>
@@ -308,8 +298,11 @@ function OrderTicket({
           <div className="review-box" aria-live="polite">
             <span className="eyebrow">Confirm order</span>
             <p>
-              <SideBadge side={side} /> <strong>{qty} {sym}</strong> · {orderType === "market" ? "Market" : `Limit ${money(Number(limit))}`} · est.{" "}
-              {money(estCost)}
+              <SideBadge side={side} />{" "}
+              <strong>
+                {qty} {sym}
+              </strong>{" "}
+              · {orderType === "market" ? "Market" : `Limit ${money(Number(limit))}`} · est. {money(estCost)}
             </p>
             <span className="muted small">Order status: not submitted</span>
             <Notice tone="warning">This action is simulated and will never be sent to a brokerage. Risk limits are checked on submission.</Notice>
@@ -330,7 +323,7 @@ function OrderTicket({
               <>
                 <span className="eyebrow">Order status</span>
                 <p>
-                  <OrderStatusBadge status={result.status} /> {result.side} {result.quantity} {result.symbol}
+                  <StatusBadge status={result.status} tones={ORDER_TONES} /> {result.side} {result.quantity} {result.symbol}
                   {result.status === "filled" && ` at ${money(result.price)}`}
                 </p>
               </>
@@ -347,39 +340,25 @@ function OrderTicket({
   );
 }
 
-const STATUS_TONE: Record<OrderStatus, "success" | "warning" | "danger" | "neutral" | "info"> = {
-  pending: "warning",
-  accepted: "info",
-  partially_filled: "info",
-  filled: "success",
-  rejected: "danger",
-  cancelled: "neutral",
-};
-
-export function OrderStatusBadge({ status }: { status: OrderStatus }) {
-  const label = status.replace("_", " ");
-  return <Badge tone={STATUS_TONE[status]}>{label[0].toUpperCase() + label.slice(1)}</Badge>;
-}
-
 type OrdersTab = "open" | "history" | "positions";
 
-function OrdersPanel({ state }: { state: AsyncState<Order[]> }) {
+function OrdersPanel({ orders, positions }: { orders: AsyncState<Order[]>; positions: AsyncState<Position[]> }) {
   const { settings } = useSession();
   const [tab, setTab] = useState<OrdersTab>("open");
-  const positions = useAsync(getPositions, [state.data?.length]);
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const open = state.data?.filter((o) => o.status === "pending" || o.status === "accepted") ?? [];
-  const history = state.data?.filter((o) => !open.includes(o)) ?? [];
+  const open = orders.data?.filter(isOpen) ?? [];
+  const history = orders.data?.filter((o) => !isOpen(o)) ?? [];
+  const rows = tab === "open" ? open : history;
 
   async function cancel(id: string) {
     setCancelling(id);
     setError(null);
     try {
       await cancelOrder(id);
-      await state.reload();
+      await orders.reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Cancel failed");
+      setError(errorMessage(err, "Cancel failed"));
     } finally {
       setCancelling(null);
     }
@@ -400,47 +379,47 @@ function OrdersPanel({ state }: { state: AsyncState<Order[]> }) {
       {error && <ErrorState message={error} compact />}
       {tab === "positions" ? (
         <DataState state={positions} isEmpty={(p) => p.length === 0} empty="No open positions.">
-          {(rows) => (
-            <div className="table-wrap">
-              <table className="table">
-                <thead>
-                  <tr><th>Symbol</th><th className="num">Quantity</th><th className="num">Average cost</th><th className="num">Market value</th><th className="num">P/L</th></tr>
-                </thead>
-                <tbody>
-                  {rows.map((r) => {
-                    const pl = (r.currentPrice - r.averageCost) * r.quantity;
-                    return (
-                      <tr key={r.symbol}>
-                        <td><div className="sym-cell"><SymbolMark symbol={r.symbol} /><strong>{r.symbol}</strong></div></td>
-                        <td className="num">{r.quantity}</td>
-                        <td className="num">{money(r.averageCost)}</td>
-                        <td className="num">{money(r.currentPrice * r.quantity)}</td>
-                        <td className={`num ${tone(pl)}`}>{signedMoney(pl)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+          {(list) => <PositionsTable rows={list} />}
         </DataState>
       ) : (
-        <DataState state={state} isEmpty={() => (tab === "open" ? open : history).length === 0} empty={tab === "open" ? "No open orders." : "No past orders yet."}>
+        <DataState state={orders} isEmpty={() => rows.length === 0} empty={tab === "open" ? "No open orders." : "No past orders yet."}>
           {() => (
             <div className="table-wrap">
               <table className="table">
                 <thead>
-                  <tr><th>Symbol</th><th>Side</th><th className="num">Quantity</th><th>Type</th><th className="num">Price</th><th>Status</th><th>Time</th>{tab === "open" && <th><span className="sr-only">Actions</span></th>}</tr>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th className="num">Quantity</th>
+                    <th>Type</th>
+                    <th className="num">Price</th>
+                    <th>Status</th>
+                    <th>Time</th>
+                    {tab === "open" && (
+                      <th>
+                        <span className="sr-only">Actions</span>
+                      </th>
+                    )}
+                  </tr>
                 </thead>
                 <tbody>
-                  {(tab === "open" ? open : history).map((o) => (
+                  {rows.map((o) => (
                     <tr key={o.id}>
-                      <td><div className="sym-cell"><SymbolMark symbol={o.symbol} /><strong>{o.symbol}</strong></div></td>
-                      <td><SideBadge side={o.side} /></td>
+                      <td>
+                        <div className="sym-cell">
+                          <SymbolMark symbol={o.symbol} />
+                          <strong>{o.symbol}</strong>
+                        </div>
+                      </td>
+                      <td>
+                        <SideBadge side={o.side} />
+                      </td>
                       <td className="num">{o.quantity}</td>
                       <td>{o.orderType === "market" ? "Market" : "Limit"}</td>
                       <td className="num">{money(o.price)}</td>
-                      <td><OrderStatusBadge status={o.status} /></td>
+                      <td title={o.rejectReason}>
+                        <StatusBadge status={o.status} tones={ORDER_TONES} />
+                      </td>
                       <td>{dateTime(o.createdAt, settings.timezone)}</td>
                       {tab === "open" && (
                         <td className="num">

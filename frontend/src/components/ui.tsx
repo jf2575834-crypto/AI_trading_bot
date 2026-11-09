@@ -1,4 +1,6 @@
 import { type ReactNode, useEffect, useRef } from "react";
+import { humanize } from "../lib/format";
+import type { SaveStatus as SaveStatusValue } from "../lib/hooks";
 import { Icon, type IconName } from "./Icon";
 
 export type Tone = "neutral" | "info" | "success" | "warning" | "danger";
@@ -77,20 +79,18 @@ type ToggleProps = {
   checked: boolean;
   onChange: (value: boolean) => void;
   label: string;
-  showLabel?: boolean;
   disabled?: boolean;
 };
 
-export function Toggle({ checked, onChange, label, showLabel, disabled }: ToggleProps) {
+export function Toggle({ checked, onChange, label, disabled }: ToggleProps) {
   return (
     <label className={`toggle ${disabled ? "disabled" : ""}`}>
-      {showLabel && <span className="toggle-text">{label}</span>}
       <input
         type="checkbox"
         role="switch"
         checked={checked}
         disabled={disabled}
-        aria-label={showLabel ? undefined : label}
+        aria-label={label}
         onChange={(e) => onChange(e.target.checked)}
       />
       <span className="toggle-track" aria-hidden>
@@ -182,6 +182,25 @@ export function SideBadge({ side }: { side: "BUY" | "SELL" }) {
   return <Badge tone={side === "BUY" ? "success" : "danger"}>{side}</Badge>;
 }
 
+/** Badge for an enum status; `tones` maps each status to a badge tone. */
+export function StatusBadge<S extends string>({ status, tones }: { status: S; tones: Record<S, Tone> }) {
+  return <Badge tone={tones[status]}>{humanize(status)}</Badge>;
+}
+
+export function RiskCheckBadge({ passed }: { passed: boolean }) {
+  return <Badge tone={passed ? "success" : "danger"}>{passed ? "Risk check passed" : "Risk check failed"}</Badge>;
+}
+
+/** Outcome message for a save, from useSave(). */
+export function SaveStatus({ status }: { status: SaveStatusValue }) {
+  if (!status) return null;
+  return (
+    <span className={`save-status ${status.tone}`} role="status">
+      <Icon name={status.tone === "success" ? "check" : "alert"} size={14} /> {status.text}
+    </span>
+  );
+}
+
 /** Loading, error, and empty handling in one place (REQ-0202). */
 export function DataState<T>({
   state,
@@ -236,17 +255,15 @@ export function Notice({
   tone = "info",
   title,
   children,
-  icon,
 }: {
   tone?: Tone;
   title?: ReactNode;
   children?: ReactNode;
-  icon?: IconName;
 }) {
-  const fallback: IconName = tone === "warning" || tone === "danger" ? "alert" : tone === "success" ? "shieldCheck" : "info";
+  const icon: IconName = tone === "warning" || tone === "danger" ? "alert" : tone === "success" ? "shieldCheck" : "info";
   return (
     <div className={`notice notice-${tone}`} role={tone === "danger" ? "alert" : undefined}>
-      <Icon name={icon ?? fallback} size={18} />
+      <Icon name={icon} size={18} />
       <div>
         {title && <strong className="notice-title">{title}</strong>}
         {children && <div className="notice-body">{children}</div>}

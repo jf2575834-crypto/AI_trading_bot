@@ -1,22 +1,24 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { LineChart, Ring, SERIES } from "../components/charts";
 import { Field } from "../components/Field";
 import { Icon } from "../components/Icon";
-import { Badge, Card, ErrorState, IconTile, Notice, Skeleton } from "../components/ui";
+import { RECOMMENDATION_TONES } from "../components/tones";
+import { Badge, Card, DataState, ErrorState, IconTile, Notice, Skeleton, StatusBadge, type Tone } from "../components/ui";
 import { getAnalysis, getStrategies, runAnalysis, setRecommendationStatus } from "../data/service";
-import type { AnalysisReport, Recommendation, RecommendationStatus } from "../data/types";
-import { dateTime, longDate, pct, signedPct, tone } from "../lib/format";
+import type { AnalysisFactor, AnalysisReport, Recommendation, RecommendationStatus } from "../data/types";
+import { daysAgo, dateTime, errorMessage, longDate, money, pct, signedPct, tone } from "../lib/format";
 import { useAsync } from "../lib/hooks";
 import { useSession } from "../lib/session";
 import type { BacktestNavState } from "./Backtesting";
-import { RecStatus } from "./Strategies";
 
-function daysAgo(n: number) {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
-}
+const FACTOR_TONES: Record<AnalysisFactor["strength"], Tone> = {
+  Strong: "success",
+  Positive: "success",
+  Moderate: "info",
+  Elevated: "warning",
+  Weak: "warning",
+};
 
 export function AiAnalysis() {
   const { settings } = useSession();
@@ -38,7 +40,7 @@ export function AiAnalysis() {
     try {
       report.setData(await runAnalysis(strategyId, start, end));
     } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Analysis failed");
+      setRunError(errorMessage(err, "Analysis failed"));
     } finally {
       setRunning(false);
     }
@@ -52,13 +54,9 @@ export function AiAnalysis() {
         <div>
           <h2 className="page-title">AI Analysis & Recommendations</h2>
           <p className="muted">
-            {r ? (
-              <>
-                Last run {dateTime(r.runAt, settings.timezone)} · data period {longDate(r.period.start)} – {longDate(r.period.end)} · model {r.model}
-              </>
-            ) : (
-              "Analyse a strategy's historical results and get suggestions to review."
-            )}
+            {r
+              ? `Last run ${dateTime(r.runAt, settings.timezone)} · data period ${longDate(r.period.start)} – ${longDate(r.period.end)} · model ${r.model}`
+              : "Analyse a strategy's historical results and get suggestions to review."}
           </p>
         </div>
       </div>
@@ -91,16 +89,14 @@ export function AiAnalysis() {
 
       {runError && <ErrorState message={runError} />}
 
-      {running || (report.loading && !r) ? (
+      {running ? (
         <Card>
           <Skeleton rows={8} />
         </Card>
-      ) : report.error && !r ? (
-        <ErrorState message={report.error} onRetry={report.reload} />
-      ) : !r ? (
-        <div className="card empty">No analysis yet for this strategy. Choose a period and run one.</div>
       ) : (
-        <Report report={r} onChange={(next) => report.setData(next)} />
+        <DataState state={report} rows={8} isEmpty={(x) => x === null} empty="No analysis yet for this strategy. Choose a period and run one.">
+          {(x) => x && <Report report={x} onChange={report.setData} />}
+        </DataState>
       )}
     </div>
   );
@@ -110,6 +106,13 @@ function Report({ report: r, onChange }: { report: AnalysisReport; onChange: (r:
   const [openDetails, setOpenDetails] = useState(true);
   const last = r.equity[r.equity.length - 1]?.value ?? 0;
   const first = r.equity[0]?.value ?? 0;
+  const lines = useMemo(
+    () => [
+      { name: "Strategy", points: r.equity, color: SERIES.primary },
+      { name: "Benchmark", points: r.benchmark, color: SERIES.benchmark, dashed: true },
+    ],
+    [r.equity, r.benchmark],
+  );
 
   return (
     <>
@@ -117,22 +120,27 @@ function Report({ report: r, onChange }: { report: AnalysisReport; onChange: (r:
         <Card title="Strategy performance" subtitle={`${r.strategyName} · ${r.symbol} · ${r.equity.length} simulated days`} icon="trendUp" actions={<Badge tone="neutral">Computed</Badge>}>
           <div className="hero-number">
             <span className="muted small">Simulated portfolio value</span>
-            <strong>${last.toLocaleString("en-US", { maximumFractionDigits: 2 })}</strong>
+            <strong>{money(last)}</strong>
             <span className={tone(last - first)}>{signedPct(((last - first) / first) * 100)} over the period</span>
           </div>
-          <LineChart
-            label="Strategy versus benchmark during the analysis period"
-            height={220}
-            series={[
-              { name: "Strategy", points: r.equity, color: SERIES.primary },
-              { name: "Benchmark", points: r.benchmark, color: SERIES.benchmark, dashed: true },
-            ]}
-          />
+          <LineChart label="Strategy versus benchmark during the analysis period" height={220} series={lines} />
           <dl className="metric-row">
-            <div><dt>Total return</dt><dd className={tone(r.metrics.totalReturnPct)}>{signedPct(r.metrics.totalReturnPct)}</dd></div>
-            <div><dt>Win rate</dt><dd>{pct(r.metrics.winRate, 0)}</dd></div>
-            <div><dt>Profit factor</dt><dd>{r.metrics.profitFactor.toFixed(2)}</dd></div>
-            <div><dt>Risk score</dt><dd>{r.metrics.riskScore} / 100</dd></div>
+            <div>
+              <dt>Total return</dt>
+              <dd className={tone(r.metrics.totalReturnPct)}>{signedPct(r.metrics.totalReturnPct)}</dd>
+            </div>
+            <div>
+              <dt>Win rate</dt>
+              <dd>{pct(r.metrics.winRate, 0)}</dd>
+            </div>
+            <div>
+              <dt>Profit factor</dt>
+              <dd>{r.metrics.profitFactor.toFixed(2)}</dd>
+            </div>
+            <div>
+              <dt>Risk score</dt>
+              <dd>{r.metrics.riskScore} / 100</dd>
+            </div>
           </dl>
         </Card>
 
@@ -142,7 +150,7 @@ function Report({ report: r, onChange }: { report: AnalysisReport; onChange: (r:
             <strong>{r.headline}</strong>
           </div>
           <p className="muted">{r.summary}</p>
-          {r.confidence && r.confidence.validated ? (
+          {r.confidence?.validated ? (
             <div className="confidence">
               <Ring value={r.confidence.value}>{r.confidence.value}%</Ring>
               <div>
@@ -161,9 +169,7 @@ function Report({ report: r, onChange }: { report: AnalysisReport; onChange: (r:
               <li key={f.label}>
                 <Icon name="check" size={14} />
                 <span>{f.label}</span>
-                <Badge tone={f.strength === "Strong" || f.strength === "Positive" ? "success" : f.strength === "Elevated" || f.strength === "Weak" ? "warning" : "info"}>
-                  {f.strength}
-                </Badge>
+                <Badge tone={FACTOR_TONES[f.strength]}>{f.strength}</Badge>
               </li>
             ))}
           </ul>
@@ -183,9 +189,7 @@ function Report({ report: r, onChange }: { report: AnalysisReport; onChange: (r:
             key={rec.id}
             report={r}
             rec={rec}
-            onUpdated={(updated) =>
-              onChange({ ...r, recommendations: r.recommendations.map((x) => (x.id === updated.id ? updated : x)) })
-            }
+            onUpdated={(updated) => onChange({ ...r, recommendations: r.recommendations.map((x) => (x.id === updated.id ? updated : x)) })}
           />
         ))}
       </div>
@@ -201,9 +205,9 @@ function Report({ report: r, onChange }: { report: AnalysisReport; onChange: (r:
         </button>
         {openDetails && (
           <div className="transparency">
-            <TransparencyCol icon="trendUp" title="Supporting signals" items={r.transparency.supporting} />
-            <TransparencyCol icon="shield" title="Limitations" items={r.transparency.limitations} />
-            <TransparencyCol icon="info" title="Uncertainty" items={r.transparency.uncertainty} />
+            <TransparencyCol icon="trendUp" tone="success" title="Supporting signals" items={r.transparency.supporting} />
+            <TransparencyCol icon="shield" tone="warning" title="Limitations" items={r.transparency.limitations} />
+            <TransparencyCol icon="info" tone="info" title="Uncertainty" items={r.transparency.uncertainty} />
           </div>
         )}
       </section>
@@ -211,10 +215,10 @@ function Report({ report: r, onChange }: { report: AnalysisReport; onChange: (r:
   );
 }
 
-function TransparencyCol({ icon, title, items }: { icon: "trendUp" | "shield" | "info"; title: string; items: string[] }) {
+function TransparencyCol({ icon, tone: t, title, items }: { icon: "trendUp" | "shield" | "info"; tone: Tone; title: string; items: string[] }) {
   return (
     <div>
-      <IconTile name={icon} tone={icon === "trendUp" ? "success" : icon === "shield" ? "warning" : "info"} />
+      <IconTile name={icon} tone={t} />
       <strong>{title}</strong>
       <ul>
         {items.map((x) => (
@@ -236,7 +240,7 @@ function RecommendationCard({ report, rec, onUpdated }: { report: AnalysisReport
     try {
       onUpdated(await setRecommendationStatus(report.strategyId, rec.id, status));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Update failed");
+      setError(errorMessage(err, "Update failed"));
     } finally {
       setBusy(false);
     }
@@ -258,13 +262,16 @@ function RecommendationCard({ report, rec, onUpdated }: { report: AnalysisReport
     <article className="card rec">
       <div className="rec-head">
         <IconTile name="sparkles" />
-        <RecStatus status={rec.status} />
+        <StatusBadge status={rec.status} tones={RECOMMENDATION_TONES} />
       </div>
       <strong>{rec.title}</strong>
       <p className="muted small">{rec.detail}</p>
       {rec.suggestedParams && (
         <p className="small">
-          Suggested: {Object.entries(rec.suggestedParams).map(([k, v]) => `${k} ${v}`).join(", ")}
+          Suggested:{" "}
+          {Object.entries(rec.suggestedParams)
+            .map(([k, v]) => `${k} ${v}`)
+            .join(", ")}
         </p>
       )}
       {error && <span className="field-error">{error}</span>}

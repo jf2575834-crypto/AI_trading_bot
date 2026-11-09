@@ -60,6 +60,7 @@ into the UI is a one-line change in `service.ts` (see [Switching the frontend ov
   "mode": "paper",
   "portfolioValue": 17807.80,
   "availableCash": 8230.17,
+  "investedValue": 9577.63,
   "totalReturnPct": 7.9,
   "totalReturnAmount": 1301.43,
   "dayChange": 65.03,
@@ -71,6 +72,8 @@ into the UI is a one-line change in `service.ts` (see [Switching the frontend ov
 
 - `mode`: `"paper" | "live"`. Must be `"paper"` for the prototype (REQ-0401).
 - `botStatus`: `"stopped" | "running" | "error"`.
+- `investedValue`: market value of open positions. The sidebar risk monitor shows
+  exposure as `investedValue / portfolioValue` against `maxExposurePct`.
 - `asOf`: when the numbers were computed. The UI warns when data is over 2 minutes old (REQ-0202).
 - The UI polls this every 30 s while the tab is visible.
 
@@ -129,8 +132,14 @@ Unknown symbol → `404`.
 ### `GET /api/assets` → `Asset[]`
 
 `{ "symbol", "name", "exchange" }` for every tradable symbol. Used for symbol
-dropdowns and ticker validation. (Currently a hard-coded list in `frontend/src/data/market.ts`;
-`listAssets()` in `service.ts` is synchronous today and will need to become async.)
+dropdowns and ticker validation. The UI loads it once per session (`getAssets` in `service.ts`).
+
+### `GET /api/market/index-history?days=22` → `Point[]` (optional, public)
+
+Closing values of the benchmark index for the decorative chart on the **login
+page**, so it must not require auth. If the backend would rather not expose an
+unauthenticated endpoint, the frontend can ship a static series instead
+(`getIndexHistory` in `service.ts`).
 
 ---
 
@@ -151,6 +160,7 @@ Response:
 ```
 
 - `status`: `"pending" | "accepted" | "partially_filled" | "filled" | "rejected" | "cancelled"`.
+- `rejectReason` (only on rejected orders): the user-facing reason, shown in order history.
 - **Idempotency (REQ-0403).** The same `Idempotency-Key` from the same user must
   never create a second order, including when two requests arrive at the same
   time. Return the original order (or the original error) for a repeat. A unique
@@ -164,7 +174,8 @@ Response:
   - a BUY costs more than available cash;
   - a SELL exceeds the shares held.
 
-  A rejected order is still recorded with `status: "rejected"` so it appears in order history.
+  A rejected order is still recorded with `status: "rejected"` and its `rejectReason`
+  so it appears in order history. A repeat of the same `Idempotency-Key` returns the same `400`.
 - **Paper only (REQ-0401).** Orders go to the paper-trading simulator or Alpaca's
   paper endpoint, never a live broker, regardless of the user's settings.
 
@@ -195,7 +206,7 @@ Only `pending` or `accepted` orders can be cancelled; otherwise `409` with e.g.
   "updatedAt": "…Z",
   "paramDefs": [
     { "key": "shortWindow", "label": "Fast period", "kind": "int", "min": 2, "max": 200, "hint": "Number of market periods" },
-    { "key": "longWindow", "label": "Slow period", "kind": "int", "min": 3, "max": 400 },
+    { "key": "longWindow", "label": "Slow period", "kind": "int", "min": 3, "max": 400, "greaterThan": "shortWindow" },
     { "key": "symbols", "label": "Applicable symbols", "kind": "symbols" },
     { "key": "signalThreshold", "label": "Signal threshold (%)", "kind": "decimal", "min": 0, "max": 100 }
   ],
@@ -207,6 +218,8 @@ Only `pending` or `accepted` orders can be cancelled; otherwise `409` with e.g.
 - `paramDefs` drives the form: the UI renders and validates whatever parameters
   the server describes, so new strategies need no frontend change.
   `kind` is `"int" | "decimal" | "symbols"`; `symbols` values are string arrays.
+  `greaterThan` (optional) names another param this one must exceed, so
+  cross-field rules live in the definition, not in code keyed on strategy ids.
 - The four strategies the UI currently ships with (ids `ma-crossover`,
   `bullish-engulfing`, `rsi`, `disclosure`) and their parameters are defined in
   `STRATEGY_SEED` in `frontend/src/data/service.ts`.
@@ -217,8 +230,9 @@ Body: the full `Strategy` as loaded, with edited `enabled` and/or `params`, and
 the `version` the client loaded.
 
 - Stale `version` → `409`.
-- Validate every param against its `paramDefs` (`422`), plus cross-field rules:
-  `longWindow > shortWindow` for `ma-crossover`, `overbought > oversold` for `rsi` (REQ-0301).
+- Validate every param against its `paramDefs`: `min`, `max`, `int`, ticker
+  format, and `greaterThan` (`422`, REQ-0301). `validateParams` in
+  `frontend/src/data/rules.ts` is the reference; the UI runs the same function.
 - On success: increment `version`, set `updatedAt`, and record the change in an
   audit/history table (REQ-0303). Enabling or disabling writes an `Activity` entry.
 
@@ -457,6 +471,14 @@ The UI hides or disables these until the backend supports them:
 | Streaming quotes | The UI polls quotes every 15 s; a WebSocket can replace this later |
 
 ---
+
+## Validation rules
+
+All validation limits in this document are implemented once in
+`frontend/src/data/rules.ts` (`validateParams`, `validateRisk`, `validateSettings`,
+`validateBacktest`). The UI uses them for instant feedback and the demo service
+uses them to enforce. The backend should implement the same rules; if it
+changes a limit, update `rules.ts` to match.
 
 ## Switching the frontend over
 

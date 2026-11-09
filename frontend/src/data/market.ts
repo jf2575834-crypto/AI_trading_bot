@@ -10,6 +10,7 @@ import type {
   Side,
   Strategy,
 } from "./types";
+import { isoDate } from "../lib/format";
 
 export const ASSETS: Asset[] = [
   { symbol: "AAPL", name: "Apple Inc.", exchange: "NASDAQ" },
@@ -32,7 +33,7 @@ const START_PRICE: Record<string, number> = {
 const VOL: Record<string, number> = { AAPL: 0.015, MSFT: 0.014, NVDA: 0.028, TSLA: 0.032, AMZN: 0.019, SPY: 0.009 };
 const DRIFT: Record<string, number> = { AAPL: 0.0006, MSFT: 0.0007, NVDA: 0.0016, TSLA: 0.0005, AMZN: 0.0008, SPY: 0.0004 };
 
-const HISTORY_START = "2023-01-02";
+export const HISTORY_START = "2023-01-02";
 
 function seededRandom(seed: number) {
   let state = seed >>> 0;
@@ -58,10 +59,6 @@ function gaussian(rand: () => number): number {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rand());
 }
 
-export function isoDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
 function businessDays(start: string, end: Date): string[] {
   const days: string[] = [];
   const cursor = new Date(`${start}T00:00:00Z`);
@@ -76,14 +73,15 @@ function businessDays(start: string, end: Date): string[] {
   return days;
 }
 
-const cache = new Map<string, Candle[]>();
+/** One entry per symbol, replaced when the day changes. */
+const cache = new Map<string, { day: string; candles: Candle[] }>();
 
 /** Daily bars up to and including the most recent business day. */
 export function dailyCandles(symbol: string): Candle[] {
-  const key = `${symbol}:${isoDate(new Date())}`;
-  const hit = cache.get(key);
-  if (hit) {
-    return hit;
+  const day = isoDate(new Date());
+  const hit = cache.get(symbol);
+  if (hit?.day === day) {
+    return hit.candles;
   }
   const rand = seededRandom(hash(symbol));
   const vol = VOL[symbol] ?? 0.02;
@@ -97,7 +95,7 @@ export function dailyCandles(symbol: string): Candle[] {
     const v = Math.round((20 + rand() * 40) * 1_000_000 * (1 + Math.abs(close - open) / open / vol));
     return { t, o: round(open), h: round(high), l: round(low), c: round(close), v };
   });
-  cache.set(key, candles);
+  cache.set(symbol, { day, candles });
   return candles;
 }
 

@@ -1,11 +1,12 @@
 import { type FormEvent, type ReactNode, useState } from "react";
 import { confirmPassword } from "../api";
 import { Field } from "../components/Field";
-import { Icon } from "../components/Icon";
-import { Badge, Card, Modal, Notice, Tabs, Toggle } from "../components/ui";
+import { Badge, Card, Modal, Notice, SaveStatus, Tabs, Toggle } from "../components/ui";
+import { SESSION_TIMEOUT, validateSettings } from "../data/rules";
 import { resetDemoData, saveSettings } from "../data/service";
 import type { UserSettings } from "../data/types";
-import { initials } from "../lib/format";
+import { errorMessage, initials, monthYear } from "../lib/format";
+import { type SaveStatus as SaveStatusValue, useSave } from "../lib/hooks";
 import { useSession } from "../lib/session";
 
 type Tab = "profile" | "trading" | "notifications" | "security";
@@ -24,7 +25,7 @@ const TIMEZONES = [
 export function Settings() {
   const { user, settings, setSettings } = useSession();
   const [tab, setTab] = useState<Tab>("profile");
-  const memberSince = new Date(user.created_at).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const memberSince = monthYear(user.created_at, settings.timezone);
 
   return (
     <div className="page">
@@ -74,34 +75,20 @@ export function Settings() {
 
 type FormProps = { settings: UserSettings; onSaved: (s: UserSettings) => void };
 
-function useSave(onSaved: (s: UserSettings) => void) {
-  const [saving, setSaving] = useState(false);
-  const [status, setStatus] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
-  async function save(next: UserSettings, message = "Saved.") {
-    setSaving(true);
-    setStatus(null);
-    try {
-      onSaved(await saveSettings(next));
-      setStatus({ tone: "success", text: message });
-      return true;
-    } catch (err) {
-      setStatus({ tone: "danger", text: err instanceof Error ? err.message : "Save failed" });
-      return false;
-    } finally {
-      setSaving(false);
-    }
-  }
-  return { saving, status, setStatus, save };
+/** Saves settings through the shared save hook and pushes the result into the session. */
+function useSettingsSave(onSaved: (s: UserSettings) => void) {
+  const { saving, status, run } = useSave();
+  const save = async (next: UserSettings, message: string) => {
+    const saved = await run(() => saveSettings(next), message);
+    if (saved) onSaved(saved);
+  };
+  return { saving, status, save };
 }
 
-function SaveBar({ saving, status, label, disabled }: { saving: boolean; status: { tone: "success" | "danger"; text: string } | null; label: string; disabled?: boolean }) {
+function SaveBar({ saving, status, label, disabled }: { saving: boolean; status: SaveStatusValue; label: string; disabled?: boolean }) {
   return (
     <footer className="form-footer">
-      {status && (
-        <span className={`save-status ${status.tone}`} role="status">
-          <Icon name={status.tone === "success" ? "check" : "alert"} size={14} /> {status.text}
-        </span>
-      )}
+      <SaveStatus status={status} />
       <button type="submit" className="btn btn-primary" disabled={saving || disabled}>
         {saving ? "Saving…" : label}
       </button>
@@ -113,8 +100,8 @@ function ProfileForm({ settings, email, onSaved }: FormProps & { email: string }
   const [name, setName] = useState(settings.displayName);
   const [timezone, setTimezone] = useState(settings.timezone);
   const [touched, setTouched] = useState(false);
-  const { saving, status, save } = useSave(onSaved);
-  const nameError = name.trim() === "" ? "Enter a display name" : name.length > 60 ? "Use 60 characters or fewer" : undefined;
+  const { saving, status, save } = useSettingsSave(onSaved);
+  const nameError = validateSettings({ ...settings, displayName: name }).displayName;
   const zones = TIMEZONES.some((z) => z.value === settings.timezone) ? TIMEZONES : [{ value: settings.timezone, label: settings.timezone }, ...TIMEZONES];
 
   function submit(e: FormEvent) {
@@ -164,7 +151,7 @@ function ReauthDialog({ open, email, onCancel, onConfirmed, children }: { open: 
       setPassword("");
       onConfirmed();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't confirm your password");
+      setError(errorMessage(err, "Couldn't confirm your password"));
     } finally {
       setBusy(false);
     }
@@ -196,7 +183,7 @@ function ReauthDialog({ open, email, onCancel, onConfirmed, children }: { open: 
 function TradingForm({ settings, email, onSaved }: FormProps & { email: string }) {
   const [mode, setMode] = useState(settings.defaultTradingMode);
   const [confirming, setConfirming] = useState(false);
-  const { saving, status, save } = useSave(onSaved);
+  const { saving, status, save } = useSettingsSave(onSaved);
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -236,7 +223,7 @@ function TradingForm({ settings, email, onSaved }: FormProps & { email: string }
 
 function NotificationsForm({ settings, onSaved }: FormProps) {
   const [prefs, setPrefs] = useState(settings.notifications);
-  const { saving, status, save } = useSave(onSaved);
+  const { saving, status, save } = useSettingsSave(onSaved);
   const items: { key: keyof UserSettings["notifications"]; label: string; text: string }[] = [
     { key: "tradeApprovals", label: "Trade approval requests", text: "When a strategy proposes a trade that needs your decision." },
     { key: "orderFills", label: "Order fills", text: "When a paper order is filled." },
@@ -272,9 +259,9 @@ function SecurityForm({ settings, email, onSaved }: FormProps & { email: string 
   const [confirming, setConfirming] = useState(false);
   const [touched, setTouched] = useState(false);
   const [resetDone, setResetDone] = useState(false);
-  const { saving, status, save } = useSave(onSaved);
+  const { saving, status, save } = useSettingsSave(onSaved);
   const n = Number(timeout);
-  const error = !Number.isInteger(n) || n < 5 || n > 720 ? "Enter whole minutes between 5 and 720" : undefined;
+  const error = validateSettings({ ...settings, sessionTimeoutMinutes: n }).sessionTimeoutMinutes;
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -287,7 +274,7 @@ function SecurityForm({ settings, email, onSaved }: FormProps & { email: string 
     <div className="stack">
       <Card title="Session & sign-in" subtitle="Control how long you stay signed in." icon="lock">
         <form onSubmit={submit} className="stack-sm" noValidate>
-          <Field label="Session timeout (minutes)" error={touched ? error : undefined} hint="Allowed range: 5 to 720 minutes. The server session also expires after 12 hours.">
+          <Field label="Session timeout (minutes)" error={touched ? error : undefined} hint={`Allowed range: ${SESSION_TIMEOUT.min} to ${SESSION_TIMEOUT.max} minutes. The server session also expires after 12 hours.`}>
             <input inputMode="numeric" value={timeout} onChange={(e) => setTimeoutValue(e.target.value)} />
           </Field>
           <div className="toggle-row">
@@ -335,7 +322,7 @@ function SecurityForm({ settings, email, onSaved }: FormProps & { email: string 
           >
             Reset demo data
           </button>
-          {resetDone && <span className="save-status success">Reset. Reloading…</span>}
+          <SaveStatus status={resetDone ? { tone: "success", text: "Reset. Reloading…" } : null} />
         </div>
       </Card>
     </div>

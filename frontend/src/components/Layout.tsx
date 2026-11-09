@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
-import { getPortfolio, getPositions, getRisk, markNotificationsRead } from "../data/service";
-import { initials, marketStatus, relativeTime } from "../lib/format";
+import { getPortfolio, getRisk, markNotificationsRead } from "../data/service";
+import { formatIn, initials, marketStatus, relativeTime } from "../lib/format";
 import { useAsync, useNow, useVisibleInterval } from "../lib/hooks";
 import { useSession } from "../lib/session";
 import { NAV_ITEMS } from "../nav";
@@ -94,19 +94,30 @@ function PendingBanner({ count }: { count: number }) {
   );
 }
 
+/** Ticking leaf components, so only they re-render every second. */
+function Clock({ timeZone }: { timeZone: string }) {
+  const now = useNow(1000);
+  return (
+    <span className="muted small">
+      {formatIn(now, timeZone, { weekday: "long", month: "short", day: "numeric" })} <span aria-hidden>·</span>{" "}
+      {formatIn(now, timeZone, { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short" })}
+    </span>
+  );
+}
+
+function MarketStatus() {
+  const market = marketStatus(useNow(30_000));
+  return (
+    <span className="market">
+      <span className={`live-dot ${market.open ? "on" : "off"}`} aria-hidden />
+      <strong>{market.open ? "Market open" : "Market closed"}</strong>
+      <span className="muted">{market.label}</span>
+    </span>
+  );
+}
+
 function TopBar({ title, onMenu }: { title: string; onMenu: () => void }) {
   const { settings, notifications } = useSession();
-  const now = useNow(1000);
-  const market = marketStatus(new Date(now));
-  const tz = settings.timezone;
-  let date = "";
-  let time = "";
-  try {
-    date = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "long", month: "short", day: "numeric" }).format(now);
-    time = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short" }).format(now);
-  } catch {
-    date = new Date(now).toDateString();
-  }
   const unread = notifications.filter((n) => !n.read).length;
 
   return (
@@ -116,16 +127,10 @@ function TopBar({ title, onMenu }: { title: string; onMenu: () => void }) {
       </button>
       <div className="topbar-title">
         <h1>{title}</h1>
-        <span className="muted small">
-          {date} <span aria-hidden>·</span> {time}
-        </span>
+        <Clock timeZone={settings.timezone} />
       </div>
       <div className="topbar-right">
-        <span className="market">
-          <span className={`live-dot ${market.open ? "on" : "off"}`} aria-hidden />
-          <strong>{market.open ? "Market open" : "Market closed"}</strong>
-          <span className="muted">{market.label}</span>
-        </span>
+        <MarketStatus />
         <Badge tone="success" dot>
           {settings.defaultTradingMode === "paper" ? "Paper trading" : "Live"}
         </Badge>
@@ -139,7 +144,7 @@ function TopBar({ title, onMenu }: { title: string; onMenu: () => void }) {
 }
 
 function NotificationMenu({ unread }: { unread: number }) {
-  const { notifications, refreshAlerts } = useSession();
+  const { notifications } = useSession();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -179,7 +184,7 @@ function NotificationMenu({ unread }: { unread: number }) {
               type="button"
               className="link-btn"
               disabled={unread === 0}
-              onClick={() => markNotificationsRead().then(refreshAlerts)}
+              onClick={() => void markNotificationsRead()}
             >
               Mark all as read
             </button>
@@ -205,9 +210,8 @@ function NotificationMenu({ unread }: { unread: number }) {
 
 function RiskMonitor() {
   const state = useAsync(async () => {
-    const [p, positions, risk] = await Promise.all([getPortfolio(), getPositions(), getRisk()]);
-    const invested = positions.reduce((s, x) => s + x.quantity * x.currentPrice, 0);
-    return { exposure: (invested / p.portfolioValue) * 100, limit: risk.maxExposurePct };
+    const [p, risk] = await Promise.all([getPortfolio(), getRisk()]);
+    return { exposure: (p.investedValue / p.portfolioValue) * 100, limit: risk.maxExposurePct };
   }, []);
   useVisibleInterval(() => void state.reload(), 30000);
   const d = state.data;

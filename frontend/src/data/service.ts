@@ -3,24 +3,19 @@
 // The backend currently only implements /auth/*. Until portfolio, order, strategy,
 // backtest, analysis, and approval endpoints exist, this module serves a per-user
 // demo simulation kept in localStorage. Each exported function is the seam for a
-// future `request()` call to the API; pages never touch the demo store directly.
-// Rules the backend must own (risk limits, idempotency, approval expiry) are
-// enforced here rather than in the pages, mirroring where they will live.
+// future `request()` call to the API (see docs/api-contract.md); pages never touch
+// the demo store or the synthetic market directly. Rules the backend must own
+// (risk limits, idempotency, approval expiry, validation) are enforced here,
+// mirroring where they will live.
 
-import {
-  ASSETS,
-  BENCHMARK,
-  BacktestError,
-  assetFor,
-  dailyCandles,
-  quoteFor,
-  round,
-  runBacktest as simulate,
-} from "./market";
+import { isoDate, money } from "../lib/format";
+import { ASSETS, BENCHMARK, BacktestError, assetFor, dailyCandles, quoteFor, round, runBacktest as simulate } from "./market";
+import { type Errors, hasErrors, validateBacktest, validateParams, validateRisk, validateSettings } from "./rules";
 import type {
   Activity,
   AnalysisReport,
   AppNotification,
+  Asset,
   BacktestRequest,
   BacktestResult,
   Candle,
@@ -44,6 +39,11 @@ export const DEMO_MODE = true;
 
 export class ServiceError extends Error {}
 
+/** Throws the first validation message, the way the API returns a 422 detail. */
+function assertValid(errors: Errors<string>) {
+  if (hasErrors(errors)) throw new ServiceError(Object.values(errors).find(Boolean)!);
+}
+
 type Holding = { symbol: string; quantity: number; averageCost: number };
 
 type Store = {
@@ -64,15 +64,20 @@ type Store = {
   lastBacktest: BacktestResult | null;
 };
 
+// History caps keep the store (and every localStorage write) bounded.
+const CAP = { activity: 100, notifications: 50, orders: 200, trades: 200, decided: 50 };
+
 let userId = "anonymous";
+let defaultName = "Trader";
 let store: Store | null = null;
 
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
 
 function storageKey() {
   return `trademind.demo.v${STORE_VERSION}.${userId}`;
 }
 
+/** Scopes the demo data to the signed-in user. A real backend scopes by token instead. */
 export function setDemoAccount(id: string, email: string) {
   if (id !== userId) {
     userId = id;
@@ -80,8 +85,6 @@ export function setDemoAccount(id: string, email: string) {
   }
   defaultName = email.split("@")[0];
 }
-
-let defaultName = "Trader";
 
 function load(): Store {
   if (store) return store;
@@ -99,12 +102,30 @@ function load(): Store {
   return store;
 }
 
+// ---------- persistence and change notification ----------
+
+const listeners = new Set<() => void>();
+let saveQueued = false;
+
+/** Subscribe to "data changed" events (fired after any mutation). Returns an unsubscribe. */
+export function onDataChange(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** Coalesces all mutations in one task into a single write and a single change event. */
 function save() {
-  try {
-    localStorage.setItem(storageKey(), JSON.stringify(store));
-  } catch {
-    // Storage full or blocked: the demo keeps working in memory.
-  }
+  if (saveQueued) return;
+  saveQueued = true;
+  queueMicrotask(() => {
+    saveQueued = false;
+    try {
+      localStorage.setItem(storageKey(), JSON.stringify(store));
+    } catch {
+      // Storage full or blocked: the demo keeps working in memory.
+    }
+    listeners.forEach((l) => l());
+  });
 }
 
 export function resetDemoData() {
@@ -116,6 +137,7 @@ export function resetDemoData() {
   store = null;
 }
 
+/** Simulated network latency. Clones so callers can never mutate the store. */
 function latency<T>(value: T, ms = 250 + Math.random() * 250): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(structuredClone(value)), ms));
 }
@@ -130,6 +152,8 @@ function minutesAgo(n: number) {
 
 // ---------------- seed ----------------
 
+const SYMBOLS_PARAM = { key: "symbols", label: "Applicable symbols", kind: "symbols", hint: "Separate symbols with commas" } as const;
+
 const STRATEGY_SEED: Strategy[] = [
   {
     id: "ma-crossover",
@@ -142,8 +166,8 @@ const STRATEGY_SEED: Strategy[] = [
     updatedAt: "",
     paramDefs: [
       { key: "shortWindow", label: "Fast period", kind: "int", min: 2, max: 200, hint: "Number of market periods" },
-      { key: "longWindow", label: "Slow period", kind: "int", min: 3, max: 400, hint: "Must be greater than the fast period" },
-      { key: "symbols", label: "Applicable symbols", kind: "symbols", hint: "Separate symbols with commas" },
+      { key: "longWindow", label: "Slow period", kind: "int", min: 3, max: 400, hint: "Must be greater than the fast period", greaterThan: "shortWindow" },
+      SYMBOLS_PARAM,
       { key: "signalThreshold", label: "Signal threshold (%)", kind: "decimal", min: 0, max: 100, hint: "Minimum confidence, percent" },
     ],
     params: { shortWindow: 20, longWindow: 50, symbols: ["AAPL", "MSFT", "NVDA"], signalThreshold: 2.5 },
@@ -159,7 +183,7 @@ const STRATEGY_SEED: Strategy[] = [
     updatedAt: "",
     paramDefs: [
       { key: "exitWindow", label: "Exit average period", kind: "int", min: 2, max: 100, hint: "Exit when the close falls below this average" },
-      { key: "symbols", label: "Applicable symbols", kind: "symbols", hint: "Separate symbols with commas" },
+      SYMBOLS_PARAM,
     ],
     params: { exitWindow: 10, symbols: ["AAPL", "TSLA"] },
   },
@@ -175,8 +199,8 @@ const STRATEGY_SEED: Strategy[] = [
     paramDefs: [
       { key: "period", label: "RSI period", kind: "int", min: 2, max: 100 },
       { key: "oversold", label: "Oversold level", kind: "decimal", min: 0, max: 100, hint: "Buy below this level" },
-      { key: "overbought", label: "Overbought level", kind: "decimal", min: 0, max: 100, hint: "Sell above this level; must exceed oversold" },
-      { key: "symbols", label: "Applicable symbols", kind: "symbols", hint: "Separate symbols with commas" },
+      { key: "overbought", label: "Overbought level", kind: "decimal", min: 0, max: 100, hint: "Sell above this level", greaterThan: "oversold" },
+      SYMBOLS_PARAM,
     ],
     params: { period: 14, oversold: 30, overbought: 70, symbols: ["NVDA", "AMZN"] },
   },
@@ -192,7 +216,7 @@ const STRATEGY_SEED: Strategy[] = [
     paramDefs: [
       { key: "minTransactionValue", label: "Minimum disclosed value ($)", kind: "decimal", min: 0 },
       { key: "maxFilingAgeDays", label: "Maximum filing age (days)", kind: "int", min: 1, max: 90, hint: "Ignore disclosures older than this" },
-      { key: "symbols", label: "Applicable symbols", kind: "symbols", hint: "Leave empty for all symbols" },
+      { ...SYMBOLS_PARAM, hint: "Leave empty for all symbols" },
     ],
     params: { minTransactionValue: 50000, maxFilingAgeDays: 5, symbols: [] },
   },
@@ -230,18 +254,18 @@ function seed(): Store {
     { id: id("a"), time: minutesAgo(130), kind: "system", title: "Strategy started", detail: "Bullish Engulfing Pattern is now monitoring" },
   ];
 
-  const trades: ExecutedTrade[] = holdings.map((h, i): ExecutedTrade => ({
-    id: id("x"),
-    time: minutesAgo(60 * 24 * (30 - i)),
-    symbol: h.symbol,
-    side: "BUY",
-    quantity: h.quantity,
-    price: h.averageCost,
-    strategyName: i % 2 === 0 ? "Moving Average Crossover" : null,
-    source: i % 2 === 0 ? "approved" : "manual",
-  })).reverse();
-
-  const strategies = STRATEGY_SEED.map((s) => ({ ...s, updatedAt: now }));
+  const trades = holdings
+    .map((h, i): ExecutedTrade => ({
+      id: id("x"),
+      time: minutesAgo(60 * 24 * (30 - i)),
+      symbol: h.symbol,
+      side: "BUY",
+      quantity: h.quantity,
+      price: h.averageCost,
+      strategyName: i % 2 === 0 ? "Moving Average Crossover" : null,
+      source: i % 2 === 0 ? "approved" : "manual",
+    }))
+    .reverse();
 
   const s: Store = {
     seededAt: now,
@@ -252,7 +276,7 @@ function seed(): Store {
     orderKeys: {},
     activity,
     trades,
-    strategies,
+    strategies: STRATEGY_SEED.map((x) => ({ ...x, updatedAt: now })),
     risk: { ...DEFAULT_RISK, version: 1, updatedAt: now },
     pending: [],
     notifications: [
@@ -273,18 +297,8 @@ function seed(): Store {
   };
   // Two pending limit orders so the order book is not empty.
   for (const [symbol, side, qty, offset] of [["NVDA", "BUY", 2, -0.02], ["TSLA", "SELL", 2, 0.03]] as const) {
-    const q = quoteFor(symbol);
-    s.orders.push({
-      id: id("o"),
-      symbol,
-      side,
-      quantity: qty,
-      orderType: "limit",
-      limitPrice: round(q.price * (1 + offset)),
-      price: round(q.price * (1 + offset)),
-      status: "pending",
-      createdAt: minutesAgo(40 + qty * 9),
-    });
+    const limit = round(quoteFor(symbol).price * (1 + offset));
+    s.orders.push({ id: id("o"), symbol, side, quantity: qty, orderType: "limit", limitPrice: limit, price: limit, status: "pending", createdAt: minutesAgo(40 + qty * 9) });
   }
   s.pending.push(makeProposal(s, 150));
   const passed = { passed: true, summary: "Proposal met configured limits", details: "Checked at proposal time" };
@@ -298,8 +312,11 @@ function seed(): Store {
 
 // ---------------- portfolio ----------------
 
-function positionsOf(s: Store): Position[] {
-  return s.holdings
+type Snapshot = { positions: Position[]; invested: number; value: number };
+
+/** Prices every holding once; pass the result around instead of recomputing. */
+function snapshot(s: Store): Snapshot {
+  const positions = s.holdings
     .filter((h) => h.quantity > 0)
     .map((h) => ({
       symbol: h.symbol,
@@ -308,24 +325,23 @@ function positionsOf(s: Store): Position[] {
       averageCost: h.averageCost,
       currentPrice: quoteFor(h.symbol).price,
     }));
-}
-
-function portfolioValue(s: Store) {
-  return s.cash + positionsOf(s).reduce((sum, p) => sum + p.quantity * p.currentPrice, 0);
+  const invested = positions.reduce((sum, p) => sum + p.quantity * p.currentPrice, 0);
+  return { positions, invested, value: s.cash + invested };
 }
 
 export async function getPortfolio(): Promise<PortfolioSummary> {
   const s = load();
-  const value = portfolioValue(s);
-  const dayChange = s.holdings.reduce((sum, h) => {
-    const c = dailyCandles(h.symbol);
-    return sum + h.quantity * (quoteFor(h.symbol).price - c[c.length - 2].c);
+  const { positions, invested, value } = snapshot(s);
+  const dayChange = positions.reduce((sum, p) => {
+    const c = dailyCandles(p.symbol);
+    return sum + p.quantity * (p.currentPrice - c[c.length - 2].c);
   }, 0);
   const active = s.strategies.filter((x) => x.enabled).length;
   return latency({
     mode: s.settings.defaultTradingMode,
     portfolioValue: round(value),
     availableCash: round(s.cash),
+    investedValue: round(invested),
     totalReturnAmount: round(value - s.initialCapital),
     totalReturnPct: round(((value - s.initialCapital) / s.initialCapital) * 100),
     dayChange: round(dayChange),
@@ -336,19 +352,19 @@ export async function getPortfolio(): Promise<PortfolioSummary> {
 }
 
 export type PerfRange = "1W" | "1M" | "3M" | "1Y" | "ALL";
-const RANGE_DAYS: Record<PerfRange, number> = { "1W": 5, "1M": 21, "3M": 63, "1Y": 252, ALL: 100000 };
+const RANGE_DAYS: Record<PerfRange, number> = { "1W": 5, "1M": 21, "3M": 63, "1Y": 252, ALL: Infinity };
 
 export async function getPerformance(range: PerfRange): Promise<{ series: Point[]; benchmark: Point[] }> {
   const s = load();
-  const days = RANGE_DAYS[range];
   const spy = dailyCandles(BENCHMARK.symbol);
-  const n = Math.min(days + 1, spy.length);
+  const n = Math.min(RANGE_DAYS[range] + 1, spy.length);
   const tail = spy.slice(-n);
+  // Every symbol shares one business-day calendar, so the same tail index lines up.
+  const closes = s.holdings.map((h) => ({ quantity: h.quantity, bars: dailyCandles(h.symbol).slice(-n) }));
   // Simulated: current holdings valued at historical closes plus current cash.
-  const closes = new Map(s.holdings.map((h) => [h.symbol, new Map(dailyCandles(h.symbol).map((c) => [c.t, c.c]))]));
-  const series = tail.map((bar) => ({
+  const series = tail.map((bar, i) => ({
     t: bar.t,
-    value: round(s.cash + s.holdings.reduce((sum, h) => sum + h.quantity * (closes.get(h.symbol)?.get(bar.t) ?? 0), 0)),
+    value: round(s.cash + closes.reduce((sum, h) => sum + h.quantity * h.bars[i].c, 0)),
   }));
   const base = series[0].value;
   const benchmark = tail.map((bar) => ({ t: bar.t, value: round(base * (bar.c / tail[0].c)) }));
@@ -356,7 +372,7 @@ export async function getPerformance(range: PerfRange): Promise<{ series: Point[
 }
 
 export async function getPositions(): Promise<Position[]> {
-  return latency(positionsOf(load()));
+  return latency(snapshot(load()).positions);
 }
 
 export async function getActivity(limit = 20): Promise<Activity[]> {
@@ -364,6 +380,10 @@ export async function getActivity(limit = 20): Promise<Activity[]> {
 }
 
 // ---------------- market ----------------
+
+export async function getAssets(): Promise<Asset[]> {
+  return latency(ASSETS, 100);
+}
 
 export async function getWatchlist(): Promise<Quote[]> {
   return latency(ASSETS.map((a) => quoteFor(a.symbol)), 200);
@@ -383,44 +403,44 @@ export async function getCandles(symbol: string, range: CandleRange): Promise<Ca
   return latency(dailyCandles(symbol).slice(-CANDLE_DAYS[range]), 200);
 }
 
-export function listAssets() {
-  return ASSETS;
+/** Benchmark index closes for the last `days` trading days (login page illustration). */
+export async function getIndexHistory(days: number): Promise<Point[]> {
+  return latency(dailyCandles(BENCHMARK.symbol).slice(-days).map((b) => ({ t: b.t, value: b.c })), 0);
 }
 
 // ---------------- orders ----------------
 
 function addActivity(s: Store, entry: Omit<Activity, "id" | "time">) {
-  s.activity.unshift({ ...entry, id: id("a"), time: new Date().toISOString() });
-  s.activity = s.activity.slice(0, 100);
+  s.activity = [{ ...entry, id: id("a"), time: new Date().toISOString() }, ...s.activity].slice(0, CAP.activity);
 }
 
 function notify(s: Store, entry: Omit<AppNotification, "id" | "time" | "read">) {
-  s.notifications.unshift({ ...entry, id: id("n"), time: new Date().toISOString(), read: false });
-  s.notifications = s.notifications.slice(0, 50);
+  s.notifications = [{ ...entry, id: id("n"), time: new Date().toISOString(), read: false }, ...s.notifications].slice(0, CAP.notifications);
 }
 
-/** Server-side risk check. Returns a reason string when the order breaks a limit. */
-function riskViolation(s: Store, symbol: string, side: Side, quantity: number, price: number): string | null {
+type RiskResult = { reason: string | null; notional: number; exposurePct: number };
+
+/**
+ * The one server-side check for orders and proposals: risk limits first, then
+ * account constraints (cash, shares held).
+ */
+function evaluateOrder(s: Store, snap: Snapshot, symbol: string, side: Side, quantity: number, price: number): RiskResult {
   const notional = quantity * price;
+  const exposurePct = ((snap.invested + (side === "BUY" ? notional : -notional)) / snap.value) * 100;
+  let reason: string | null = null;
   if (side === "BUY") {
     if (notional > s.risk.maxPositionSize) {
-      return `Order value $${notional.toFixed(2)} exceeds the $${s.risk.maxPositionSize.toLocaleString()} maximum position size.`;
-    }
-    if (notional > s.cash) {
-      return "Not enough simulated cash for this order.";
-    }
-    const invested = positionsOf(s).reduce((sum, p) => sum + p.quantity * p.currentPrice, 0);
-    const exposure = ((invested + notional) / portfolioValue(s)) * 100;
-    if (exposure > s.risk.maxExposurePct) {
-      return `Order would raise exposure to ${exposure.toFixed(1)}%, above the ${s.risk.maxExposurePct}% limit.`;
+      reason = `Order value ${money(notional)} exceeds the ${money(s.risk.maxPositionSize, true)} maximum position size.`;
+    } else if (exposurePct > s.risk.maxExposurePct) {
+      reason = `Order would raise exposure to ${exposurePct.toFixed(1)}%, above the ${s.risk.maxExposurePct}% limit.`;
+    } else if (notional > s.cash) {
+      reason = "Not enough simulated cash for this order.";
     }
   } else {
     const held = s.holdings.find((h) => h.symbol === symbol)?.quantity ?? 0;
-    if (quantity > held) {
-      return `You hold ${held} ${symbol}; you cannot sell ${quantity}.`;
-    }
+    if (quantity > held) reason = `You hold ${held} ${symbol}; you cannot sell ${quantity}.`;
   }
-  return null;
+  return { reason, notional, exposurePct };
 }
 
 function fill(s: Store, order: Order, price: number) {
@@ -443,17 +463,18 @@ function fill(s: Store, order: Order, price: number) {
   order.price = price;
 }
 
+/**
+ * Records and returns the order. Risk failures come back as `status: "rejected"`
+ * with a `rejectReason` (callers decide how to surface them); malformed requests throw.
+ */
 function placeOrder(s: Store, req: Omit<OrderRequest, "idempotencyKey">, source: ExecutedTrade["source"], strategyName: string | null): Order {
   const symbol = req.symbol.trim().toUpperCase();
-  if (!assetFor(symbol)) {
-    throw new ServiceError(`${symbol} is not a supported symbol.`);
-  }
-  if (!(req.quantity > 0) || !Number.isInteger(req.quantity)) {
-    throw new ServiceError("Quantity must be a whole number greater than 0.");
-  }
+  if (!assetFor(symbol)) throw new ServiceError(`${symbol} is not a supported symbol.`);
+  if (!(req.quantity > 0) || !Number.isInteger(req.quantity)) throw new ServiceError("Quantity must be a whole number greater than 0.");
+
   const quote = quoteFor(symbol);
   const checkPrice = req.orderType === "limit" && req.limitPrice ? req.limitPrice : quote.price;
-  const violation = riskViolation(s, symbol, req.side, req.quantity, checkPrice);
+  const { reason } = evaluateOrder(s, snapshot(s), symbol, req.side, req.quantity, checkPrice);
   const order: Order = {
     id: id("o"),
     symbol,
@@ -465,59 +486,54 @@ function placeOrder(s: Store, req: Omit<OrderRequest, "idempotencyKey">, source:
     status: "accepted",
     createdAt: new Date().toISOString(),
   };
-  if (violation) {
+  s.orders = [order, ...s.orders].slice(0, CAP.orders);
+
+  if (reason) {
     order.status = "rejected";
-    s.orders.unshift(order);
-    addActivity(s, { kind: "order", side: req.side, title: `${req.side} · ${symbol} rejected`, detail: violation });
-    throw new ServiceError(violation);
+    order.rejectReason = reason;
+    addActivity(s, { kind: "order", side: req.side, title: `${req.side} · ${symbol} rejected`, detail: reason });
+    return order;
   }
   const marketable =
-    req.orderType === "market" ||
-    (req.side === "BUY" ? quote.price <= (req.limitPrice ?? 0) : quote.price >= (req.limitPrice ?? Infinity));
-  if (marketable) {
-    const price = req.orderType === "market" ? quote.price : Math.min(quote.price, req.limitPrice ?? quote.price);
-    fill(s, order, req.side === "BUY" ? price : Math.max(price, quote.price));
-    s.trades.unshift({ id: id("x"), time: order.createdAt, symbol, side: req.side, quantity: req.quantity, price: order.price, strategyName, source });
-    addActivity(s, { kind: "execution", side: req.side, title: `${req.side} · ${symbol}`, detail: `${req.quantity} shares filled at $${order.price.toFixed(2)}` });
-    if (s.settings.notifications.orderFills) {
-      notify(s, { kind: "approved", title: `${symbol} paper order filled`, body: `${req.side} ${req.quantity} ${symbol} at $${order.price.toFixed(2)} (simulated).` });
-    }
-  } else {
+    req.orderType === "market" || (req.side === "BUY" ? quote.price <= (req.limitPrice ?? 0) : quote.price >= (req.limitPrice ?? Infinity));
+  if (!marketable) {
     order.status = "pending";
-    addActivity(s, { kind: "order", side: req.side, title: `${req.side} · ${symbol} limit placed`, detail: `${req.quantity} shares at $${req.limitPrice?.toFixed(2)}` });
+    addActivity(s, { kind: "order", side: req.side, title: `${req.side} · ${symbol} limit placed`, detail: `${req.quantity} shares at ${money(req.limitPrice ?? 0)}` });
+    return order;
   }
-  s.orders.unshift(order);
+  // Limit buys fill at no more than the limit; sells at no less than the market.
+  const price = req.side === "BUY" ? Math.min(quote.price, req.limitPrice ?? quote.price) : quote.price;
+  fill(s, order, price);
+  s.trades = [{ id: id("x"), time: order.createdAt, symbol, side: req.side, quantity: req.quantity, price, strategyName, source }, ...s.trades].slice(0, CAP.trades);
+  addActivity(s, { kind: "execution", side: req.side, title: `${req.side} · ${symbol}`, detail: `${req.quantity} shares filled at ${money(price)}` });
+  if (s.settings.notifications.orderFills) {
+    notify(s, { kind: "approved", title: `${symbol} paper order filled`, body: `${req.side} ${req.quantity} ${symbol} at ${money(price)} (simulated).` });
+  }
   return order;
 }
 
 const inflightOrders = new Map<string, Promise<Order>>();
 
+function orderOutcome(order: Order): Order {
+  if (order.status === "rejected") throw new ServiceError(order.rejectReason ?? "Order rejected.");
+  return structuredClone(order);
+}
+
 /** Idempotent: repeated or concurrent calls with the same key yield one order (REQ-0403). */
 export function submitOrder(req: OrderRequest): Promise<Order> {
   const s = load();
-  const existing = s.orderKeys[req.idempotencyKey];
-  if (existing) {
-    const order = s.orders.find((o) => o.id === existing);
-    if (order) return latency(order);
-  }
+  const existing = s.orders.find((o) => o.id === s.orderKeys[req.idempotencyKey]);
+  if (existing) return latency(null, 100).then(() => orderOutcome(existing));
   const inflight = inflightOrders.get(req.idempotencyKey);
   if (inflight) return inflight;
-  const p = (async () => {
-    await latency(null, 600);
-    try {
+  const p = latency(null, 600)
+    .then(() => {
       const order = placeOrder(s, req, "manual", null);
       s.orderKeys[req.idempotencyKey] = order.id;
-      return structuredClone(order);
-    } catch (error) {
-      // placeOrder records rejected orders first; map the key to it so retries don't resubmit.
-      const rejected = s.orders[0];
-      if (rejected?.status === "rejected") s.orderKeys[req.idempotencyKey] = rejected.id;
-      throw error;
-    } finally {
       save();
-      inflightOrders.delete(req.idempotencyKey);
-    }
-  })();
+      return orderOutcome(order);
+    })
+    .finally(() => inflightOrders.delete(req.idempotencyKey));
   inflightOrders.set(req.idempotencyKey, p);
   return p;
 }
@@ -556,14 +572,8 @@ export async function saveStrategy(next: Strategy): Promise<Strategy> {
   if (current.version !== next.version) {
     throw new ServiceError("This strategy was changed elsewhere. Reload and try again.");
   }
-  const p = next.params;
-  if (next.id === "ma-crossover" && Number(p.longWindow) <= Number(p.shortWindow)) {
-    throw new ServiceError("Slow period must be greater than the fast period.");
-  }
-  if (next.id === "rsi" && Number(p.overbought) <= Number(p.oversold)) {
-    throw new ServiceError("Overbought level must be greater than the oversold level.");
-  }
-  const saved: Strategy = { ...next, version: current.version + 1, updatedAt: new Date().toISOString() };
+  assertValid(validateParams(current.paramDefs, next.params));
+  const saved: Strategy = { ...current, enabled: next.enabled, params: next.params, version: current.version + 1, updatedAt: new Date().toISOString() };
   s.strategies = s.strategies.map((x) => (x.id === next.id ? saved : x));
   if (current.enabled !== saved.enabled) {
     addActivity(s, { kind: "system", title: saved.enabled ? "Strategy started" : "Strategy stopped", detail: `${saved.name} ${saved.enabled ? "is now monitoring" : "was disabled"}` });
@@ -581,9 +591,7 @@ export async function saveRisk(next: RiskSettings): Promise<RiskSettings> {
   if (s.risk.version !== next.version) {
     throw new ServiceError("Risk settings were changed elsewhere. Reload and try again.");
   }
-  if (next.maxPositionSize <= 0 || next.maxExposurePct <= 0 || next.maxExposurePct > 100) {
-    throw new ServiceError("Risk limits are out of range.");
-  }
+  assertValid(validateRisk(next));
   s.risk = { ...next, version: s.risk.version + 1, updatedAt: new Date().toISOString() };
   addActivity(s, { kind: "system", title: "Risk settings updated", detail: `Version ${s.risk.version}` });
   save();
@@ -592,21 +600,25 @@ export async function saveRisk(next: RiskSettings): Promise<RiskSettings> {
 
 // ---------------- backtesting ----------------
 
-export async function runBacktest(req: BacktestRequest): Promise<BacktestResult> {
-  const s = load();
-  const strategy = s.strategies.find((x) => x.id === req.strategyId);
-  if (!strategy) throw new ServiceError("Strategy not found.");
-  await latency(null, 900);
+function backtest(strategy: Strategy, req: BacktestRequest): BacktestResult {
   try {
-    const tested = req.paramOverrides ? { ...strategy, params: { ...strategy.params, ...req.paramOverrides } } : strategy;
-    const result = simulate(tested, req);
-    s.lastBacktest = result;
-    save();
-    return structuredClone(result);
+    return simulate(strategy, req);
   } catch (error) {
     if (error instanceof BacktestError) throw new ServiceError(error.message);
     throw error;
   }
+}
+
+export async function runBacktest(req: BacktestRequest): Promise<BacktestResult> {
+  const s = load();
+  const strategy = s.strategies.find((x) => x.id === req.strategyId);
+  if (!strategy) throw new ServiceError("Strategy not found.");
+  assertValid(validateBacktest(req, isoDate(new Date())));
+  await latency(null, 900);
+  const tested = req.paramOverrides ? { ...strategy, params: { ...strategy.params, ...req.paramOverrides } } : strategy;
+  s.lastBacktest = backtest(tested, req);
+  save();
+  return structuredClone(s.lastBacktest);
 }
 
 export async function getLastBacktest(): Promise<BacktestResult | null> {
@@ -627,19 +639,14 @@ export async function runAnalysis(strategyId: string, start: string, end: string
     throw new ServiceError("Analysis needs backtest data, and disclosure history is not loaded yet.");
   }
   await latency(null, 1200);
-  const symbols = (strategy.params.symbols as string[]).filter((x) => assetFor(x));
-  const symbol = symbols[0] ?? "AAPL";
-  let bt: BacktestResult;
-  try {
-    bt = simulate(strategy, { strategyId, symbol, startDate: start, endDate: end, initialCapital: 10000, feePct: 0.05, slippagePct: 0.05 });
-  } catch (error) {
-    throw new ServiceError(error instanceof Error ? error.message : "Analysis failed.");
-  }
-  const grossWin = bt.trades.filter((t) => (t.pnl ?? 0) > 0).reduce((a, t) => a + (t.pnl ?? 0), 0);
-  const grossLoss = -bt.trades.filter((t) => (t.pnl ?? 0) < 0).reduce((a, t) => a + (t.pnl ?? 0), 0);
+  const symbol = (strategy.params.symbols as string[]).find((x) => assetFor(x)) ?? "AAPL";
+  const bt = backtest(strategy, { strategyId, symbol, startDate: start, endDate: end, initialCapital: 10000, feePct: 0.05, slippagePct: 0.05 });
+  const pnls = bt.trades.map((t) => t.pnl ?? 0);
+  const grossWin = pnls.filter((p) => p > 0).reduce((a, p) => a + p, 0);
+  const grossLoss = -pnls.filter((p) => p < 0).reduce((a, p) => a + p, 0);
   const outperform = bt.totalReturnPct >= bt.benchmarkReturnPct;
   const prev = s.analyses[strategyId];
-  const recs: Recommendation[] = buildRecommendations(strategy, bt).map((r) => {
+  const recs = buildRecommendations(strategy, bt).map((r) => {
     const old = prev?.recommendations.find((x) => x.title === r.title);
     return old ? { ...r, id: old.id, status: old.status } : r;
   });
@@ -664,7 +671,7 @@ export async function runAnalysis(strategyId: string, start: string, end: string
     metrics: {
       totalReturnPct: bt.totalReturnPct,
       winRate: bt.winRate,
-      profitFactor: grossLoss === 0 ? round(grossWin > 0 ? 99 : 0) : round(grossWin / grossLoss),
+      profitFactor: grossLoss === 0 ? (grossWin > 0 ? 99 : 0) : round(grossWin / grossLoss),
       riskScore: Math.min(100, Math.round(bt.maxDrawdownPct * 2 + bt.totalTrades / 4)),
     },
     equity: bt.equity,
@@ -676,11 +683,7 @@ export async function runAnalysis(strategyId: string, start: string, end: string
         `Win rate ${bt.winRate.toFixed(0)}% over ${bt.closedTrades} closed trades.`,
         `Compared against a simulated S&P 500 benchmark.`,
       ],
-      limitations: [
-        "Uses fictional, synthetic price data.",
-        "Only the first applicable symbol is analysed.",
-        "News and fundamental events are not represented.",
-      ],
+      limitations: ["Uses fictional, synthetic price data.", "Only the first applicable symbol is analysed.", "News and fundamental events are not represented."],
       uncertainty: [
         "No validated confidence measure exists yet, so none is shown.",
         "Past simulated results do not predict future performance.",
@@ -694,44 +697,43 @@ export async function runAnalysis(strategyId: string, start: string, end: string
 }
 
 function buildRecommendations(strategy: Strategy, bt: BacktestResult): Recommendation[] {
+  const rec = (title: string, detail: string, suggestedParams?: Record<string, number>): Recommendation => ({
+    id: id("r"),
+    title,
+    detail,
+    status: "proposed",
+    suggestedParams,
+  });
   const recs: Recommendation[] = [];
   if (strategy.id === "ma-crossover") {
     const short = Number(strategy.params.shortWindow);
     const long = Number(strategy.params.longWindow);
-    recs.push({
-      id: id("r"),
-      title: "Review moving average parameters",
-      detail: bt.totalTrades > 30
-        ? `With ${bt.totalTrades} trades, a slower fast period (${short + 5}/${long}) may reduce whipsaw trades and fees.`
-        : `With only ${bt.totalTrades} trades, a faster fast period (${Math.max(2, short - 5)}/${long}) may react sooner to trends.`,
-      status: "proposed",
-      suggestedParams: { shortWindow: bt.totalTrades > 30 ? short + 5 : Math.max(2, short - 5), longWindow: long },
-    });
+    const busy = bt.totalTrades > 30;
+    const next = busy ? short + 5 : Math.max(2, short - 5);
+    recs.push(
+      rec(
+        "Review moving average parameters",
+        busy
+          ? `With ${bt.totalTrades} trades, a slower fast period (${next}/${long}) may reduce whipsaw trades and fees.`
+          : `With only ${bt.totalTrades} trades, a faster fast period (${next}/${long}) may react sooner to trends.`,
+        { shortWindow: next, longWindow: long },
+      ),
+    );
   } else if (strategy.id === "rsi") {
-    recs.push({
-      id: id("r"),
-      title: "Widen RSI thresholds",
-      detail: "Moving thresholds to 25/75 may filter weaker signals; test before adopting.",
-      status: "proposed",
-      suggestedParams: { oversold: 25, overbought: 75 },
-    });
+    recs.push(rec("Widen RSI thresholds", "Moving thresholds to 25/75 may filter weaker signals; test before adopting.", { oversold: 25, overbought: 75 }));
   } else {
-    recs.push({ id: id("r"), title: "Review exit rule", detail: "A longer exit average may let winning trades run further.", status: "proposed", suggestedParams: { exitWindow: Number(strategy.params.exitWindow) + 5 } });
+    recs.push(rec("Review exit rule", "A longer exit average may let winning trades run further.", { exitWindow: Number(strategy.params.exitWindow) + 5 }));
   }
-  recs.push({
-    id: id("r"),
-    title: "Compare strategy performance with the benchmark",
-    detail: bt.totalReturnPct >= bt.benchmarkReturnPct
-      ? `The strategy beat the benchmark by ${(bt.totalReturnPct - bt.benchmarkReturnPct).toFixed(1)} points but check whether the ${bt.maxDrawdownPct.toFixed(1)}% drawdown is acceptable.`
-      : `The strategy trailed the benchmark by ${(bt.benchmarkReturnPct - bt.totalReturnPct).toFixed(1)} points; consider whether it adds value over holding the index.`,
-    status: "proposed",
-  });
-  recs.push({
-    id: id("r"),
-    title: "Consider position concentration",
-    detail: "Results come from a single symbol. Spreading signals across more symbols may reduce company-specific risk.",
-    status: "proposed",
-  });
+  const gap = bt.totalReturnPct - bt.benchmarkReturnPct;
+  recs.push(
+    rec(
+      "Compare strategy performance with the benchmark",
+      gap >= 0
+        ? `The strategy beat the benchmark by ${gap.toFixed(1)} points but check whether the ${bt.maxDrawdownPct.toFixed(1)}% drawdown is acceptable.`
+        : `The strategy trailed the benchmark by ${(-gap).toFixed(1)} points; consider whether it adds value over holding the index.`,
+    ),
+    rec("Consider position concentration", "Results come from a single symbol. Spreading signals across more symbols may reduce company-specific risk."),
+  );
   return recs;
 }
 
@@ -745,9 +747,7 @@ export async function setRecommendationStatus(strategyId: string, recId: string,
   rec.status = status;
   if (status === "accepted" && rec.suggestedParams) {
     s.strategies = s.strategies.map((x) =>
-      x.id === strategyId
-        ? { ...x, params: { ...x.params, ...rec.suggestedParams }, version: x.version + 1, updatedAt: new Date().toISOString() }
-        : x,
+      x.id === strategyId ? { ...x, params: { ...x.params, ...rec.suggestedParams }, version: x.version + 1, updatedAt: new Date().toISOString() } : x,
     );
     addActivity(s, { kind: "system", title: "Recommendation adopted", detail: `${rec.title} applied as a new strategy version` });
   }
@@ -757,10 +757,23 @@ export async function setRecommendationStatus(strategyId: string, recId: string,
 
 // ---------------- approvals & notifications ----------------
 
-const RATIONALES = [
-  (sym: string) => `${sym}'s 20-day moving average crossed above its 50-day average while volume stayed above its recent baseline. This is a simulated strategy signal, not a prediction or recommendation.`,
-  (sym: string) => `${sym} printed a bullish engulfing candle after several down sessions. This is a simulated strategy signal, not a prediction or recommendation.`,
-];
+const RATIONALES = {
+  crossover: (sym: string) =>
+    `${sym}'s 20-day moving average crossed above its 50-day average while volume stayed above its recent baseline. This is a simulated strategy signal, not a prediction or recommendation.`,
+  engulfing: (sym: string) =>
+    `${sym} printed a bullish engulfing candle after several down sessions. This is a simulated strategy signal, not a prediction or recommendation.`,
+};
+
+function riskCheckFor(s: Store, snap: Snapshot, p: Pick<PendingTrade, "symbol" | "action" | "quantity" | "estimatedPrice">): PendingTrade["riskCheck"] {
+  const r = evaluateOrder(s, snap, p.symbol, p.action, p.quantity, p.estimatedPrice);
+  return r.reason
+    ? { passed: false, summary: "Proposal breaks a configured limit", details: r.reason }
+    : {
+        passed: true,
+        summary: "Proposal meets configured limits",
+        details: `Position ${money(r.notional, true)} of ${money(s.risk.maxPositionSize, true)} limit · Exposure ${r.exposurePct.toFixed(0)}% of ${s.risk.maxExposurePct}%`,
+      };
+}
 
 function makeProposal(s: Store, ttlSeconds: number): PendingTrade {
   const enabled = s.strategies.filter((x) => x.enabled && x.kind === "technical");
@@ -768,47 +781,47 @@ function makeProposal(s: Store, ttlSeconds: number): PendingTrade {
   const symbols = (strategy.params.symbols as string[]).filter((x) => assetFor(x));
   const symbol = symbols[Math.floor(Math.random() * symbols.length)] ?? "AAPL";
   const q = quoteFor(symbol);
-  const invested = positionsOf(s).reduce((sum, p) => sum + p.quantity * p.currentPrice, 0);
-  const exposureRoom = (s.risk.maxExposurePct / 100) * portfolioValue(s) - invested;
+  const snap = snapshot(s);
+  // Size inside the limits, leaving headroom for price moves before approval.
+  const exposureRoom = (s.risk.maxExposurePct / 100) * snap.value - snap.invested;
   const budget = Math.min(s.risk.maxPositionSize, s.cash, exposureRoom * 0.5, 1800);
-  const quantity = Math.max(1, Math.floor(budget / q.price));
-  const violation = riskViolation(s, symbol, "BUY", quantity, q.price);
-  const exposure = (((invested + quantity * q.price) / portfolioValue(s)) * 100).toFixed(0);
-  return {
+  const proposal = {
     id: crypto.randomUUID(),
-    action: "BUY",
+    action: "BUY" as const,
     symbol,
     name: q.name,
-    quantity,
+    quantity: Math.max(1, Math.floor(budget / q.price)),
     estimatedPrice: q.price,
     strategyName: strategy.name,
-    rationale: RATIONALES[strategy.id === "bullish-engulfing" ? 1 : 0](symbol),
-    riskCheck: violation
-      ? { passed: false, summary: "Proposal breaks a configured limit", details: violation }
-      : { passed: true, summary: "Proposal meets configured limits", details: `Position $${(quantity * q.price).toFixed(0)} of $${s.risk.maxPositionSize.toLocaleString()} limit · Exposure ${exposure}% of ${s.risk.maxExposurePct}%` },
+    rationale: (strategy.id === "bullish-engulfing" ? RATIONALES.engulfing : RATIONALES.crossover)(symbol),
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
-    status: "pending",
+    status: "pending" as const,
     decidedAt: null,
   };
+  return { ...proposal, riskCheck: riskCheckFor(s, snap, proposal) };
 }
 
-function expireStale(s: Store) {
-  let changed = false;
+/** Expires overdue proposals and refreshes the risk check on live ones against current limits. */
+function refreshPending(s: Store) {
+  const snap = snapshot(s);
+  const now = Date.now();
   for (const p of s.pending) {
-    if (p.status === "pending" && new Date(p.expiresAt).getTime() <= Date.now()) {
+    if (p.status !== "pending") continue;
+    if (new Date(p.expiresAt).getTime() <= now) {
       p.status = "expired";
       p.decidedAt = p.expiresAt;
       addActivity(s, { kind: "signal", side: p.action, title: `${p.action} · ${p.symbol} proposal expired`, detail: "No decision before the deadline; not executed" });
-      changed = true;
+      save();
+    } else {
+      p.riskCheck = riskCheckFor(s, snap, p);
     }
   }
-  if (changed) save();
 }
 
 export async function getPendingTrades(): Promise<PendingTrade[]> {
   const s = load();
-  expireStale(s);
+  refreshPending(s);
   return latency(s.pending, 200);
 }
 
@@ -816,15 +829,11 @@ const deciding = new Set<string>();
 
 export async function decideTrade(tradeId: string, decision: "approve" | "reject"): Promise<PendingTrade> {
   const s = load();
-  expireStale(s);
+  refreshPending(s);
   const p = s.pending.find((x) => x.id === tradeId);
   if (!p) throw new ServiceError("Proposal not found.");
-  if (p.status !== "pending") {
-    throw new ServiceError(`This proposal is already ${p.status}.`);
-  }
-  if (deciding.has(p.id)) {
-    throw new ServiceError("A decision for this proposal is already being processed.");
-  }
+  if (p.status !== "pending") throw new ServiceError(`This proposal is already ${p.status}.`);
+  if (deciding.has(p.id)) throw new ServiceError("A decision for this proposal is already being processed.");
   deciding.add(p.id);
   try {
     await latency(null, 500);
@@ -832,7 +841,7 @@ export async function decideTrade(tradeId: string, decision: "approve" | "reject
     deciding.delete(p.id);
   }
   if (new Date(p.expiresAt).getTime() <= Date.now()) {
-    expireStale(s);
+    refreshPending(s);
     throw new ServiceError("This proposal expired before your decision was received. Nothing was executed.");
   }
   p.decidedAt = new Date().toISOString();
@@ -840,15 +849,19 @@ export async function decideTrade(tradeId: string, decision: "approve" | "reject
     p.status = "rejected";
     notify(s, { kind: "rejected", title: `${p.symbol} proposal rejected`, body: `A simulated ${p.action.toLowerCase()} proposal was rejected during manual review.` });
   } else {
-    try {
-      placeOrder(s, { symbol: p.symbol, side: p.action, quantity: p.quantity, orderType: "market", limitPrice: null }, "approved", p.strategyName);
+    const order = placeOrder(s, { symbol: p.symbol, side: p.action, quantity: p.quantity, orderType: "market", limitPrice: null }, "approved", p.strategyName);
+    if (order.status === "rejected") {
+      p.status = "failed";
+      notify(s, { kind: "risk", title: `${p.symbol} approval failed`, body: order.rejectReason ?? "Order could not be placed." });
+    } else {
       p.status = "approved";
       notify(s, { kind: "approved", title: `${p.symbol} paper trade approved`, body: `Approved simulated ${p.action === "BUY" ? "purchase" : "sale"} of ${p.quantity} ${p.symbol} shares.` });
-    } catch (error) {
-      p.status = "failed";
-      notify(s, { kind: "risk", title: `${p.symbol} approval failed`, body: error instanceof Error ? error.message : "Order could not be placed." });
     }
   }
+  // Keep every live proposal, but only the most recent decisions.
+  const live = s.pending.filter((x) => x.status === "pending");
+  const decided = s.pending.filter((x) => x.status !== "pending").slice(0, CAP.decided);
+  s.pending = [...live, ...decided];
   save();
   return structuredClone(p);
 }
@@ -888,15 +901,7 @@ export async function getSettings(): Promise<UserSettings> {
 
 export async function saveSettings(next: UserSettings): Promise<UserSettings> {
   const s = load();
-  if (next.defaultTradingMode === "live") {
-    throw new ServiceError("Live trading is not available in this prototype.");
-  }
-  if (next.sessionTimeoutMinutes < 5 || next.sessionTimeoutMinutes > 720) {
-    throw new ServiceError("Session timeout must be between 5 and 720 minutes.");
-  }
-  if (next.displayName.trim().length === 0 || next.displayName.length > 60) {
-    throw new ServiceError("Display name must be 1 to 60 characters.");
-  }
+  assertValid(validateSettings(next));
   s.settings = { ...next, displayName: next.displayName.trim(), twoFactorEnabled: null };
   save();
   return latency(s.settings, 350);

@@ -864,6 +864,9 @@ select {
   align-items: center;
   gap: 6px;
 }
+.candles.hovering g[data-i] {
+  opacity: 0.55;
+}
 .chart-note {
   color: var(--text-3);
   font-size: 11px;
@@ -888,6 +891,9 @@ select {
 }
 .risk-head strong {
   white-space: nowrap;
+}
+.risk-head svg {
+  flex-shrink: 0;
 }
 .ring-label {
   position: relative;
