@@ -54,6 +54,16 @@ def health():
     }
 
 
+@app.get("/api/v1/assets")
+def get_assets():
+    return {
+        "assets": [
+            {"symbol": "AAPL", "name": "Apple"},
+            {"symbol": "MSFT", "name": "Microsoft"},
+        ]
+    }
+
+
 @app.get("/api/v1/strategies")
 def get_strategies():
     return {

@@ -134,3 +134,15 @@ def test_trading_run_rejects_invalid_windows():
     )
 
     assert response.status_code == 422
+
+
+def test_get_assets():
+    response = client.get("/api/v1/assets")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "assets": [
+            {"symbol": "AAPL", "name": "Apple"},
+            {"symbol": "MSFT", "name": "Microsoft"},
+        ]
+    }
