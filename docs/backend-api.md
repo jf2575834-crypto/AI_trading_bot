@@ -103,6 +103,45 @@ The backend currently allows cross-origin requests from:
 
 The frontend should use the backend base URL `http://localhost:8000` during local development.
 
+## Running the Backend Locally
+
+### 1. Set up Python
+
+From the TradeMind project directory:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+```
+
+### 2. Start the Backend
+
+```bash
+./scripts/start-backend.sh
+```
+
+The backend will be available at:
+
+- API: http://127.0.0.1:8000
+- Interactive documentation: http://127.0.0.1:8000/docs
+
+Press Control+C to stop the server.
+
+### 3. Market Data
+
+The assets and strategies endpoints do not require Alpaca credentials.
+
+The offline dataset endpoints require the corresponding AAPL/MSFT JSON files in `data/local/`. These files are not included in Git.
+
+The live market-data endpoint requires separately configured Alpaca credentials. Never commit API keys to GitHub.
+
+### 4. GUI Integration
+
+The GUI can connect to the backend from `http://localhost:5173` or `http://127.0.0.1:5173`.
+
+Trading execution currently returns HTTP 501 until the CPU algorithm and FPGA interface are integrated.
+
 ## Remaining Integration Work
 
 - Connect Xa-Quan's CPU moving-average algorithm.
