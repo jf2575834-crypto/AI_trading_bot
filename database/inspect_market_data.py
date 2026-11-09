@@ -1,4 +1,5 @@
 """Read-only preflight. Usage: python inspect_market_data.py /path/to/database/.env"""
+
 import json
 import sys
 

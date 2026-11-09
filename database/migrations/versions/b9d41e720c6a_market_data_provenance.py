@@ -68,8 +68,7 @@ def upgrade():
         conn,
         "SELECT EXISTS (SELECT 1 FROM market_data WHERE data_source IS NOT NULL "
         "AND (length(data_source) > 32 OR btrim(data_source) = ''))",
-        "Resolve blank or overlength data_source values explicitly; "
-        "provider will not be truncated",
+        "Resolve blank or overlength data_source values explicitly; provider will not be truncated",
     )
     reject(
         conn,
@@ -84,16 +83,22 @@ def upgrade():
         sa.Column("ingested_at", sa.DateTime(timezone=True), nullable=True),
     )
     # Use migration time, not unverified naive created_at, as the observed ingestion time.
-    conn.execute(sa.text("""UPDATE market_data m SET
+    conn.execute(
+        sa.text("""UPDATE market_data m SET
         provider = COALESCE(m.data_source, 'legacy_unknown'),
         feed = 'legacy_unknown', adjustment = 'legacy_unknown',
         currency = a.currency, ingested_at = transaction_timestamp()
-        FROM assets a WHERE a.id = m.asset_id"""))
+        FROM assets a WHERE a.id = m.asset_id""")
+    )
     for name in ("provider", "feed", "adjustment", "currency", "ingested_at"):
         op.alter_column("market_data", name, nullable=False)
     for name in PRICES + ["volume"]:
-        op.alter_column("market_data", name, type_=sa.Numeric(28, 10),
-                        postgresql_using=f'"{name}"::numeric(28,10)')
+        op.alter_column(
+            "market_data",
+            name,
+            type_=sa.Numeric(28, 10),
+            postgresql_using=f'"{name}"::numeric(28,10)',
+        )
     if naive:
         # PostgreSQL utility statements require a safely quoted SQL literal.
         literal = str(
@@ -109,10 +114,13 @@ def upgrade():
     op.drop_constraint("uq_market_data_asset_timeframe", "market_data", type_="unique")
     op.create_unique_constraint("uq_market_data_provenance", "market_data", KEY)
     op.drop_constraint("chk_market_data_prices", "market_data", type_="check")
-    op.create_check_constraint("chk_market_data_prices", "market_data",
+    op.create_check_constraint(
+        "chk_market_data_prices",
+        "market_data",
         "low_price >= 0 AND high_price >= low_price AND open_price >= low_price "
         "AND open_price <= high_price AND close_price >= low_price AND close_price <= high_price "
-        "AND high_price < 'Infinity'::numeric")
+        "AND high_price < 'Infinity'::numeric",
+    )
     op.drop_constraint("chk_market_data_volume", "market_data", type_="check")
     op.create_check_constraint(
         "chk_market_data_volume",
@@ -139,9 +147,13 @@ def downgrade():
         "GROUP BY asset_id, timestamp, timeframe HAVING count(*) > 1)",
         "Downgrade blocked: multiple provenances collide under the old unique key",
     )
-    reject(conn, "SELECT EXISTS (SELECT 1 FROM market_data WHERE " + " OR ".join(
-        f"{n} <= 0 OR {n} >= 1000000000 OR {n} <> round({n}, 6)" for n in PRICES) + ")",
-        "Downgrade blocked: prices cannot be represented exactly as positive NUMERIC(15,6)")
+    reject(
+        conn,
+        "SELECT EXISTS (SELECT 1 FROM market_data WHERE "
+        + " OR ".join(f"{n} <= 0 OR {n} >= 1000000000 OR {n} <> round({n}, 6)" for n in PRICES)
+        + ")",
+        "Downgrade blocked: prices cannot be represented exactly as positive NUMERIC(15,6)",
+    )
     reject(
         conn,
         "SELECT EXISTS (SELECT 1 FROM market_data "
@@ -175,7 +187,7 @@ def downgrade():
         "market_data",
         "timestamp",
         type_=sa.DateTime(),
-        postgresql_using='"timestamp" AT TIME ZONE \'UTC\'',
+        postgresql_using="\"timestamp\" AT TIME ZONE 'UTC'",
     )
     op.create_unique_constraint(
         "uq_market_data_asset_timeframe",

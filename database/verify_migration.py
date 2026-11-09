@@ -1,4 +1,5 @@
 """Exercise real PostgreSQL DDL in a temporary schema, rolling everything back."""
+
 import importlib.util
 import sys
 import uuid
@@ -40,7 +41,7 @@ with engine.connect() as conn:
             if aware:
                 conn.exec_driver_sql(
                     'ALTER TABLE market_data ALTER COLUMN "timestamp" TYPE timestamptz '
-                    'USING "timestamp" AT TIME ZONE \'UTC\''
+                    "USING \"timestamp\" AT TIME ZONE 'UTC'"
                 )
             conn.exec_driver_sql("INSERT INTO assets (symbol) VALUES ('FIXTURE')")
             conn.exec_driver_sql(
@@ -51,11 +52,16 @@ with engine.connect() as conn:
             )
             before = conn.execute(text('SELECT id, asset_id, "timestamp" FROM market_data')).one()
             change.op = ops
+
             class Context:
                 @staticmethod
-                def is_offline_mode(): return False
+                def is_offline_mode():
+                    return False
+
                 @staticmethod
-                def get_x_argument(**kwargs): return arguments
+                def get_x_argument(**kwargs):
+                    return arguments
+
             change.context = Context
             arguments = {}
             if not aware:
