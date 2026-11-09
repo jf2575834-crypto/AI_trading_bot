@@ -20,5 +20,7 @@ open `html/index.html` in a browser. GitHub keeps workflow artifacts for up to 9
 days, subject to repository settings.
 
 You can read this overview and the source comments in the repository any time.
-To build the HTML locally, install Doxygen, run `doxygen Doxyfile` from the repository
-root, and open `build/doxygen/html/index.html`.
+To build the HTML locally, install Doxygen, create the output folder (`mkdir -p
+build/doxygen` on macOS/Linux or `New-Item -ItemType Directory -Force build\doxygen`
+in PowerShell), run `doxygen Doxyfile` from the repository root, and open
+`build/doxygen/html/index.html`.
