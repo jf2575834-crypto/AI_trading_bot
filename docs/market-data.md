@@ -50,18 +50,22 @@ Application errors omit credentials and provider response bodies.
 
 ## Run
 
-Initialize a development database explicitly. This only creates the isolated
-`market_candles` table; it does not create the PostgreSQL database itself:
+For shared PostgreSQL, follow [database setup](../database/README.md) first and apply
+the Alembic migrations. Set the ingestion process's `DATABASE_URL` to that same
+database. The ingestion CLI does not automatically load `database/.env`.
+PostgreSQL connections now write to `assets` and `market_data`:
 
 ```powershell
-.venv/Scripts/trademind-data.exe init-db
 .venv/Scripts/trademind-data.exe history --symbols AAPL MSFT --timeframe 1Min --start 2026-10-01T00:00:00Z --end 2026-10-02T00:00:00Z
 .venv/Scripts/trademind-data.exe latest --symbols AAPL MSFT
 .venv/Scripts/trademind-data.exe stream --symbols AAPL MSFT
 ```
 
 On Linux/macOS use `.venv/bin/trademind-data` instead. For a local demonstration
-without PostgreSQL, set `DATABASE_URL=sqlite:///market-data.db`. The `latest` command
+without PostgreSQL, set `DATABASE_URL=sqlite:///market-data.db` and explicitly run
+`trademind-data init-db` to create the original `market_candles` demo table.
+`init-db` rejects PostgreSQL connections and directs you to Alembic.
+The `latest` command
 prints JSON and does not need a database. History and streaming persist data; the
 stream command also prints each persisted live event as a JSON line. Ctrl+C stops it.
 
@@ -100,26 +104,48 @@ missing fields, naive timestamps, and values outside NUMERIC(28,10) precision ar
 rejected before persistence. Only raw USD bars are supported in this version.
 Historical symbol mapping is disabled (`asof=-`) for stable ticker identities.
 Historical timeframes accept 1–59Min, 1–23Hour, 1Day, 1Week, and supported Month
-intervals. Latest and streamed candles are always 1Min.
+intervals. Shared PostgreSQL storage accepts only `1Min`, `5Min`, `15Min`, `1Hour`,
+`4Hour`, `1Day`, and `1Week`, matching the shared schema. Unsupported durations
+raise an error before writing a batch; they are never relabelled. SQLite retains
+the original provider intervals. Latest and streamed candles are always 1Min.
 
-## Database owner handoff (KAN-18 / KAN-5)
+## Shared database storage (KAN-60 / KAN-31)
 
-`migrations/001_market_candles.sql` is the proposed PostgreSQL DDL. `storage.py`
-exposes the matching SQLAlchemy table and a `CandleStore` protocol. The composite
-primary key is `(provider, feed, adjustment, currency, symbol, timeframe, timestamp)`.
-Prices and volume use NUMERIC(28,10), timestamps use TIMESTAMPTZ, and a check
-constraint protects OHLCV bounds. An index supports symbol/timeframe/range queries.
+`SQLCandleStore` selects `SharedMarketDataStore` for PostgreSQL and the original
+demo store for SQLite. PostgreSQL uses the existing migrations in `database/`;
+ingestion never creates, replaces or migrates shared tables.
 
-`upsert()` uses a transaction and ON CONFLICT DO UPDATE to incorporate late bar
-corrections and avoid duplicate records. Repeated keys inside a batch are folded
-before insertion. `ingested_at` records the most recent write. The latest timestamp
-lookup filters to the same provider, feed, raw USD, and 1Min series.
+The writer resolves uppercase tickers through `assets.symbol` and writes the
+asset UUID into `market_data.asset_id`. Missing symbols are registered as
+`stock`/`USD` in the candle transaction, with a generated UUID and the shared
+defaults for other fields. Company name and exchange remain unset when unknown.
+Pre-register ETFs with their correct asset type. Existing USD stocks/ETFs are
+reused without overwriting company name, exchange, active state or other metadata.
+Non-USD or incompatible asset types, symbols longer than 20 characters, and
+ambiguous case variants are rejected. Historical reads never create assets.
 
-This table is proposed independently because the repository has no existing schema
-or migration tooling. The database owner should review naming, asset identifiers,
-schema placement, and foreign keys, then bring this DDL into the shared migrations.
-Ingestion never runs schema creation automatically. To use a different team schema,
-provide a `CandleStore` implementing `upsert()` and `latest_timestamp()`.
+OHLC fields map to `open_price`, `high_price`, `low_price`, `close_price`. Prices
+and volume remain Decimal/NUMERIC(28,10), and timestamps are UTC-aware. Intervals
+map as follows: `1Min`/`5Min`/`15Min` to `1m`/`5m`/`15m`, `1Hour`/`4Hour` to
+`1h`/`4h`, and `1Day`/`1Week` to `1d`/`1w`. Reads restore the original provider
+interval so existing Candle and JSON consumers keep the same contract.
+
+The conflict identity is
+`(asset_id, provider, feed, adjustment, currency, timeframe, timestamp)`.
+Each page is atomic, including new assets. Concurrent writers use the existing
+unique symbol constraint to avoid registering duplicate canonical symbols.
+Repeated candle keys within a page are folded before insertion. Corrections
+update OHLCV and `ingested_at` while retaining the existing candle UUID.
+Historical reads filter the resolved asset and the same provenance, interval,
+and inclusive UTC range. Stream recovery selects only Alpaca/raw/USD/1m records
+from the requested feed.
+
+Existing SQLite data and snapshots are not automatically copied into PostgreSQL.
+Re-ingest the selected range, or load a validated saved dataset and call
+`SQLCandleStore.from_url(shared_url).upsert(dataset.candles)`; this requires no
+Alpaca keys. Keep the shared URL in private environment configuration and dispose
+the engine after use. The old `migrations/001_market_candles.sql` describes the
+legacy standalone table and must not be applied to the shared database.
 
 ## Live consumers and recovery
 
@@ -188,4 +214,4 @@ GitHub Actions supplies PostgreSQL 16 and runs every test plus lint/format check
 Live provider acceptance still needs the team's Alpaca credentials and entitled
 feed: ingest a known historical range, compare records to the chosen reference,
 observe bars during market hours, and confirm reconnect recovery. The database
-owner's shared-schema review is also outstanding.
+owner's review and the deployed backend/algorithm integration are still required.

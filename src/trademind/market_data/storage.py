@@ -1,4 +1,4 @@
-"""Isolated market_candles table; the database owner can replace CandleStore."""
+"""! @brief Use shared PostgreSQL storage or the original SQLite demo database."""
 
 from collections.abc import Iterable
 from dataclasses import asdict
@@ -18,11 +18,11 @@ from sqlalchemy import (
     func,
     select,
 )
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
 from .models import Candle, symbols, timeframe, utc_datetime
+from .shared_storage import SharedMarketDataStore
 
 metadata = MetaData()
 KEY = ("provider", "feed", "adjustment", "currency", "symbol", "timeframe", "timestamp")
@@ -44,28 +44,104 @@ market_candles = Table(
 
 
 class CandleStore(Protocol):
+    """! @brief Persistence interface consumed by history ingestion and stream recovery."""
+
     def upsert(self, bars: Iterable[Candle]) -> int: ...
     def latest_timestamp(self, symbol: str, feed: str) -> datetime | None: ...
 
 
 class SQLCandleStore:
+    """! @brief Select shared market_data for PostgreSQL and legacy market_candles for SQLite.
+    PostgreSQL must already have the team's Alembic migrations applied.
+    SQLite remains available for existing local demo databases and offline exports.
+    """
+
     def __init__(self, engine: Engine):
+        """! @brief Bind storage to an existing SQLAlchemy engine without connecting.
+        @param engine PostgreSQL or SQLite engine; the caller disposes it after use.
+        @exception ValueError For unsupported database dialects.
+        """
         if engine.dialect.name not in {"postgresql", "sqlite"}:
             raise ValueError("Use PostgreSQL or SQLite for development")
         self.engine = engine
+        backend = (
+            SharedMarketDataStore if engine.dialect.name == "postgresql" else _SQLiteCandleStore
+        )
+        self._backend = backend(engine)
 
     @classmethod
     def from_url(cls, url: str) -> "SQLCandleStore":
+        """! @brief Configure the shared or local demo store from DATABASE_URL.
+        @param url SQLAlchemy connection URL, obtained from private environment settings.
+        @return Store whose engine hides bound parameters in database errors.
+        @exception ValueError If no URL is configured or its dialect is unsupported.
+        """
         if not url:
             raise ValueError("Set DATABASE_URL before persisting market data")
         return cls(create_engine(url, pool_pre_ping=True, hide_parameters=True))
 
     def create_schema(self) -> None:
-        """Explicit development bootstrap; never invoked automatically during ingestion."""
+        """! @brief Explicitly create only the SQLite demo table.
+        @exception ValueError For PostgreSQL, which must use database/Alembic migrations.
+        """
+        if self.engine.dialect.name == "postgresql":
+            raise ValueError(
+                "Shared PostgreSQL setup requires Alembic; follow database/README.md "
+                "and run python -m alembic upgrade head from database/"
+            )
+        self._backend.create_schema()
+
+    def upsert(self, bars: Iterable[Candle]) -> int:
+        """! @brief Persist a page atomically, folding duplicate identities and corrections.
+        @param bars Normalized raw USD candles with UTC timestamps and Decimal values.
+        @return Number of distinct identities written, including corrected records.
+        @exception ValueError If a candle cannot fit the selected storage contract.
+        PostgreSQL also resolves or creates stock assets in the same transaction.
+        """
+        return self._backend.upsert(bars)
+
+    def latest_timestamp(self, symbol: str, feed: str) -> datetime | None:
+        """! @brief Read the latest Alpaca raw USD minute timestamp for recovery.
+        @param symbol Stock ticker.
+        @param feed Explicit Alpaca IEX or SIP feed.
+        @return UTC-aware timestamp or None if no matching records exist.
+        """
+        return self._backend.latest_timestamp(symbol, feed)
+
+    def history(
+        self, symbol: str, frame: str, start: datetime, end: datetime, *, feed: str = "iex"
+    ) -> tuple[Candle, ...]:
+        """! @brief Read an ordered, inclusive range from one Alpaca raw USD series.
+        @param symbol Stock ticker.
+        @param frame Alpaca interval, such as 1Min or 1Day.
+        @param start Inclusive timezone-aware range beginning.
+        @param end Inclusive timezone-aware range end, after start.
+        @param feed Explicit Alpaca IEX or SIP feed.
+        @return Immutable UTC candles with Decimal prices and volume; empty if not found.
+        @exception ValueError If the range or series cannot fit the storage contract.
+        Reads never create assets or write candles.
+        """
+        return self._backend.history(symbol, frame, start, end, feed=feed)
+
+
+class _SQLiteCandleStore:
+    """! @brief Preserve the original SQLite demo schema and snapshot behavior."""
+
+    def __init__(self, engine: Engine):
+        """! @brief Bind the local SQLite demo database.
+        @param engine Existing SQLite engine owned by the facade.
+        """
+        self.engine = engine
+
+    def create_schema(self) -> None:
+        """! @brief Explicitly bootstrap the local market_candles demo table."""
         metadata.create_all(self.engine)
 
     def upsert(self, bars: Iterable[Candle]) -> int:
-        # Duplicate keys in a single PG INSERT must be folded before ON CONFLICT.
+        """! @brief Atomically write a local demo page, including corrected candles.
+        @param bars Normalized candles with UTC timestamps and Decimal values.
+        @return Number of distinct candle identities written.
+        """
         rows = {}
         for candle in bars:
             values = asdict(candle)
@@ -73,9 +149,8 @@ class SQLCandleStore:
             rows[tuple(values[k] for k in KEY)] = values
         if not rows:
             return 0
-        insert = pg_insert if self.engine.dialect.name == "postgresql" else sqlite_insert
         # Executemany avoids SQLite's bind-parameter ceiling for large history pages.
-        statement = insert(market_candles)
+        statement = sqlite_insert(market_candles)
         statement = statement.on_conflict_do_update(
             index_elements=list(KEY),
             set_={
@@ -95,6 +170,11 @@ class SQLCandleStore:
         return len(rows)
 
     def latest_timestamp(self, symbol: str, feed: str) -> datetime | None:
+        """! @brief Read the latest persisted local minute timestamp for recovery.
+        @param symbol Stock ticker.
+        @param feed Explicit Alpaca feed.
+        @return UTC-aware timestamp or None if no matching candle exists.
+        """
         with self.engine.connect() as connection:
             value = connection.scalar(
                 select(func.max(market_candles.c.timestamp)).where(

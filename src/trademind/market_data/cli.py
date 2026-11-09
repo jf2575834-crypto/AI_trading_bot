@@ -44,7 +44,7 @@ def main() -> int:
     """
     parser = argparse.ArgumentParser(description="TradeMind stock market data ingestion")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("init-db", help="Explicitly create the market_candles development table")
+    commands.add_parser("init-db", help="Create the SQLite demo table; PostgreSQL uses Alembic")
     history = commands.add_parser("history")
     history.add_argument("--symbols", nargs="+", required=True)
     history.add_argument("--timeframe", type=timeframe, default="1Min")
@@ -103,7 +103,8 @@ def main() -> int:
         return 1
     except SQLAlchemyError:
         print(
-            "Database operation failed; check DATABASE_URL and the market_candles schema",
+            "Database operation failed; check DATABASE_URL and the schema. "
+            "PostgreSQL requires the migrations in database/README.md",
             file=sys.stderr,
         )
         return 1
