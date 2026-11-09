@@ -99,3 +99,38 @@ def test_get_dataset():
     assert data["count"] == 51
     assert len(data["candles"]) == 51
     assert data["sha256"] == "a" * 64
+
+
+def test_trading_run_returns_501_until_integrated():
+    response = client.post(
+        "/api/v1/trading/run",
+        json={
+            "symbol": "AAPL",
+            "strategy": "moving_average_crossover",
+            "parameters": {
+                "short_window": 20,
+                "long_window": 50,
+            },
+            "execution_mode": "cpu",
+        },
+    )
+
+    assert response.status_code == 501
+    assert "not implemented" in response.json()["detail"].lower()
+
+
+def test_trading_run_rejects_invalid_windows():
+    response = client.post(
+        "/api/v1/trading/run",
+        json={
+            "symbol": "AAPL",
+            "strategy": "moving_average_crossover",
+            "parameters": {
+                "short_window": 50,
+                "long_window": 20,
+            },
+            "execution_mode": "cpu",
+        },
+    )
+
+    assert response.status_code == 422

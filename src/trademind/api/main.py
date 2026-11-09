@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, model_validator
 
 from trademind.market_data.alpaca import AlpacaClient
 from trademind.market_data.config import Settings
@@ -25,6 +26,24 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+
+
+class TradingParameters(BaseModel):
+    short_window: int = Field(default=20, ge=1)
+    long_window: int = Field(default=50, ge=2)
+
+    @model_validator(mode="after")
+    def validate_windows(self):
+        if self.short_window >= self.long_window:
+            raise ValueError("short_window must be smaller than long_window")
+        return self
+
+
+class TradingRunRequest(BaseModel):
+    symbol: str = Field(pattern=r"^(AAPL|MSFT)$")
+    strategy: str = Field(pattern=r"^moving_average_crossover$")
+    parameters: TradingParameters = Field(default_factory=TradingParameters)
+    execution_mode: str = Field(pattern=r"^(cpu|fpga)$")
 
 
 @app.get("/health")
@@ -167,3 +186,14 @@ async def get_dataset(symbol: str):
         "sha256": dataset.sha256,
         "candles": [candle.to_json() for candle in dataset.candles],
     }
+
+
+@app.post("/api/v1/trading/run", status_code=501)
+async def run_trading_strategy(request: TradingRunRequest):
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Trading execution is not implemented yet. "
+            "Waiting for CPU algorithm and FPGA integration."
+        ),
+    )
