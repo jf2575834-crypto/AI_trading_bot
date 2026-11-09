@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
-from .models import Candle
+from .models import Candle, symbols, timeframe, utc_datetime
 
 metadata = MetaData()
 KEY = ("provider", "feed", "adjustment", "currency", "symbol", "timeframe", "timestamp")
@@ -109,3 +109,45 @@ class SQLCandleStore:
         if value is None:
             return None
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    def history(
+        self, symbol: str, frame: str, start: datetime, end: datetime, *, feed: str = "iex"
+    ) -> tuple[Candle, ...]:
+        """! @brief Read one raw USD Alpaca series in ascending UTC timestamp order.
+        @param symbol Stock ticker to retrieve.
+        @param frame Candle interval, such as 1Min.
+        @param start Inclusive, timezone-aware beginning of the requested range.
+        @param end Inclusive, timezone-aware end of the requested range.
+        @param feed Explicit feed; IEX and SIP records are never combined.
+        @return Immutable candles; empty when no stored records match. No database writes.
+        @exception ValueError If the symbol, timeframe, feed or range is invalid.
+        """
+        ticker, frame = symbols([symbol])[0], timeframe(frame)
+        start, end = utc_datetime(start), utc_datetime(end)
+        if end <= start or feed not in {"iex", "sip"}:
+            raise ValueError("Use end after start and feed iex or sip")
+        statement = (
+            select(market_candles)
+            .where(
+                market_candles.c.symbol == ticker,
+                market_candles.c.timeframe == frame,
+                market_candles.c.timestamp >= start,
+                market_candles.c.timestamp <= end,
+                market_candles.c.provider == "alpaca",
+                market_candles.c.feed == feed,
+                market_candles.c.adjustment == "raw",
+                market_candles.c.currency == "USD",
+            )
+            .order_by(market_candles.c.timestamp)
+        )
+        with self.engine.connect() as connection:
+            result = []
+            for row in connection.execute(statement).mappings():
+                values = {
+                    name: row[name] for name in market_candles.c.keys() if name != "ingested_at"
+                }
+                # SQLite drops tzinfo; this table's persistence contract is always UTC.
+                if values["timestamp"].tzinfo is None:
+                    values["timestamp"] = values["timestamp"].replace(tzinfo=UTC)
+                result.append(Candle(**values))
+        return tuple(result)
