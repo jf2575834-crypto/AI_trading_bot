@@ -1,13 +1,12 @@
 from datetime import UTC, datetime, timedelta
 
-from fastapi import HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 
 from trademind.market_data.alpaca import AlpacaClient
 from trademind.market_data.config import Settings
 from trademind.market_data.models import MarketDataError, symbols, timeframe
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="TradeMind Backend API",
@@ -49,6 +48,7 @@ def get_strategies():
             }
         ]
     }
+
 
 @app.get("/api/v1/market-data")
 async def get_market_data(
