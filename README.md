@@ -91,6 +91,8 @@ See [setup, usage, provider evaluation, and database handoff](docs/market-data.m
 Requires Python 3.11+. Install with `python -m pip install -e '.[dev]'` and run
 `trademind-data --help`. Run the tests with `python -m pytest -q`.
 
+For the FPGA prototype, see [Joel's historical dataset and backend handoff](docs/prototype-market-data.md).
+It covers repeatable offline inputs, saved-data export, and the remaining integration decisions.
 
 # Web App (Frontend + Auth API)
 The React frontend is in `frontend/` and implements every screen in the UI design

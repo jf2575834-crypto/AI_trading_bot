@@ -1,15 +1,18 @@
-"""CLI for schema bootstrap, history ingestion, latest bars, and live dispatch."""
+"""! @brief CLI for ingestion, live dispatch and reproducible historical dataset export."""
 
 import argparse
 import asyncio
 import contextlib
 import json
+import os
 import sys
+from pathlib import Path
 
 from sqlalchemy.exc import SQLAlchemyError
 
 from .alpaca import AlpacaClient, AlpacaStream
 from .config import Settings
+from .datasets import save_dataset
 from .models import MarketDataError, symbols, timeframe, utc_datetime
 from .pipeline import IngestionPipeline, LiveBuffer
 from .storage import SQLCandleStore
@@ -36,6 +39,9 @@ async def run_stream(pipeline, settings, tickers):
 
 
 def main() -> int:
+    """! @brief Run a data command using environment configuration and command-line inputs.
+    @return Zero on success, one on a handled error, or 130 on keyboard interruption.
+    """
     parser = argparse.ArgumentParser(description="TradeMind stock market data ingestion")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init-db", help="Explicitly create the market_candles development table")
@@ -48,14 +54,32 @@ def main() -> int:
     latest.add_argument("--symbols", nargs="+", required=True)
     live = commands.add_parser("stream")
     live.add_argument("--symbols", nargs="+", required=True)
+    export = commands.add_parser("export", help="Freeze stored history for offline CPU/FPGA inputs")
+    export.add_argument("--symbol", required=True)
+    export.add_argument(
+        "--feed", choices=("iex", "sip"), default=os.getenv("ALPACA_DATA_FEED", "iex")
+    )
+    export.add_argument("--timeframe", type=timeframe, default="1Min")
+    export.add_argument("--start", type=utc_datetime, required=True)
+    export.add_argument("--end", type=utc_datetime, required=True)
+    export.add_argument("--min-bars", type=int, default=1)
+    export.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     store = None
     try:
-        # init-db needs only a database URL, not a market-data account.
-        if args.command == "init-db":
-            import os
-
+        # Stored-data commands need only a database URL, not a market-data account.
+        if args.command in {"init-db", "export"}:
             store = SQLCandleStore.from_url(os.getenv("DATABASE_URL", ""))
+        if args.command == "export":
+            bars = store.history(args.symbol, args.timeframe, args.start, args.end, feed=args.feed)
+            dataset = save_dataset(args.output, bars, args.start, args.end, min_bars=args.min_bars)
+            print(
+                json.dumps(
+                    {"candles": len(bars), "sha256": dataset.sha256, "output": str(args.output)}
+                )
+            )
+            return 0
+        if args.command == "init-db":
             store.create_schema()
             print("market_candles table ready")
             return 0
@@ -80,6 +104,12 @@ def main() -> int:
     except SQLAlchemyError:
         print(
             "Database operation failed; check DATABASE_URL and the market_candles schema",
+            file=sys.stderr,
+        )
+        return 1
+    except OSError:
+        print(
+            "Dataset file operation failed; check the path and use a new output filename",
             file=sys.stderr,
         )
         return 1
