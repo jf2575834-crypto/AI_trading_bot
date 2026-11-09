@@ -498,3 +498,38 @@ changes a limit, update `rules.ts` to match.
 4. When every function is switched, set `DEMO_MODE = false` (hides the
    "Simulate strategy signal" button) and delete the demo store and `market.ts`
    (keep `runBacktest` as a reference for the server).
+
+## Frontend Integration Endpoints
+
+Base URL: `http://127.0.0.1:8000`
+
+### Authentication
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/auth/signup` | Register a user |
+| POST | `/auth/login` | Log in and receive a bearer token |
+| GET | `/auth/me` | Get the authenticated user |
+| POST | `/auth/logout` | End the current session |
+
+### Market Data
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/assets` | List supported assets |
+| GET | `/api/market/quotes` | Get latest quotes |
+| GET | `/api/market/quotes/{symbol}` | Get a quote for one asset |
+| GET | `/api/market/candles/{symbol}?range=1M` | Get historical daily candles |
+
+Supported candle ranges: `1M`, `3M`, `6M`, `1Y`.
+
+All `/api/` endpoints require:
+
+`Authorization: Bearer <access_token>`
+
+The access token is returned by `/auth/login`.
+
+**Current limitations:**
+- Quote `changePct` is currently `null`.
+- Trading execution, positions, backtesting, and AI analysis
+  require additional backend integration.
