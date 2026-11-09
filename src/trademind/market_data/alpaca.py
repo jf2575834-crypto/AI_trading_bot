@@ -1,4 +1,6 @@
-"""Read-only Alpaca stock data, using documented REST and WebSocket protocols."""
+"""! @brief Retrieve Alpaca stock bars over REST and WebSocket protocols.
+The clients return UTC-aware candles with exact Decimal values and do not submit orders.
+"""
 
 import asyncio
 import json
@@ -20,6 +22,11 @@ DATA_URL = "https://data.alpaca.markets"
 
 
 def decode(payload: str | bytes):
+    """! @brief Parse a provider JSON message without converting decimals to floats.
+    @param payload UTF-8 JSON text or bytes from Alpaca.
+    @return Decoded JSON values, with decimal numbers represented as Decimal.
+    @exception MarketDataError If the payload is malformed JSON.
+    """
     try:
         return json.loads(payload, parse_float=Decimal)
     except (ValueError, TypeError) as exc:
@@ -27,6 +34,11 @@ def decode(payload: str | bytes):
 
 
 def retry_after(response: httpx.Response, fallback: float) -> float:
+    """! @brief Choose a bounded wait from Alpaca rate-limit headers.
+    @param response HTTP response carrying optional Retry-After/reset headers.
+    @param fallback Backoff delay in seconds when headers are absent or invalid.
+    @return Delay between zero and 300 seconds, or the supplied fallback.
+    """
     value = response.headers.get("Retry-After")
     if value:
         try:
@@ -50,6 +62,10 @@ def retry_after(response: httpx.Response, fallback: float) -> float:
 
 
 class AlpacaClient:
+    """! @brief Fetch historical and latest raw USD stock candles from Alpaca REST.
+    Requests use the configured IEX or SIP feed, bounded retries and a shared request-rate limit.
+    """
+
     def __init__(
         self,
         settings: Settings,
@@ -58,6 +74,12 @@ class AlpacaClient:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ):
+        """! @brief Create an Alpaca client with optional transport and clock controls.
+        @param settings Validated API credentials, feed and retry/network limits.
+        @param transport Optional HTTP transport, useful for local tests.
+        @param sleep Delay function used between retries and rate-limited requests.
+        @param clock Monotonic clock used to enforce the request rate.
+        """
         self.settings = settings
         self._sleep, self._clock = sleep, clock
         self._last_request: float | None = None
@@ -70,12 +92,24 @@ class AlpacaClient:
         )
 
     def __enter__(self):
+        """! @brief Return this client as a context manager resource.
+        @return This AlpacaClient instance.
+        """
         return self
 
     def __exit__(self, *args):
+        """! @brief Close the underlying HTTP connection pool on context exit.
+        @param args Context-manager exception details, if an exception occurred.
+        """
         self._client.close()
 
     def _request(self, path: str, params: dict) -> dict:
+        """! @brief Send one rate-limited GET request and retry transient failures.
+        @param path Relative Alpaca market-data endpoint.
+        @param params Query parameters for the endpoint.
+        @return Decoded provider response object.
+        @exception MarketDataError For failed retries, rejected responses or invalid payloads.
+        """
         for attempt in range(self.settings.max_retries + 1):
             if self._last_request is not None:
                 wait = 60 / self.settings.requests_per_minute - (self._clock() - self._last_request)
@@ -115,6 +149,16 @@ class AlpacaClient:
         *,
         page_size: int = 1000,
     ) -> Iterator[list[Candle]]:
+        """! @brief Yield ascending pages of historical candles for explicit symbols.
+        @param tickers Symbols requested from Alpaca.
+        @param frame Supported Alpaca interval such as 1Min or 1Day.
+        @param start Inclusive timezone-aware UTC range start.
+        @param end Optional timezone-aware range end, inclusive per the Alpaca bars API.
+        @param page_size Number of records requested per page, from 1 to 10000.
+        @return Pages of normalized raw USD candles; an empty page is possible.
+        @exception ValueError For invalid symbols, interval, range or page size.
+        @exception MarketDataError For invalid responses or pagination tokens.
+        """
         selected = symbols(tickers)
         frame, start = timeframe(frame), utc_datetime(start)
         if not 1 <= page_size <= 10000:
@@ -148,6 +192,12 @@ class AlpacaClient:
             params["page_token"] = token
 
     def latest(self, tickers: list[str] | tuple[str, ...]) -> list[Candle]:
+        """! @brief Retrieve the latest one-minute bar for each available symbol.
+        @param tickers Explicit stock symbols to request.
+        @return Normalized raw USD candles; symbols with no bar are omitted.
+        @exception ValueError For invalid symbols.
+        @exception MarketDataError For rejected or malformed provider responses.
+        """
         selected = symbols(tickers)
         data = self._request(
             "/v2/stocks/bars/latest",
@@ -158,6 +208,14 @@ class AlpacaClient:
     def _bars(
         self, data: dict, selected: tuple[str, ...], frame: str, latest=False
     ) -> list[Candle]:
+        """! @brief Validate an Alpaca bars object and normalize its candle records.
+        @param data Decoded response containing the provider's bars map.
+        @param selected Symbols that were requested.
+        @param frame Candle interval to attach to each record.
+        @param latest Whether this response uses the one-record latest-bars shape.
+        @return Validated candles, empty when Alpaca reports no matching bars.
+        @exception MarketDataError For missing, unexpected or malformed records.
+        """
         # Alpaca can return bars=null when no bars match the query.
         if "bars" not in data:
             raise MarketDataError("Missing bars in Alpaca response")
@@ -181,10 +239,24 @@ class AlpacaClient:
 
 
 class AlpacaStream:
+    """! @brief Authenticate to Alpaca and yield corrected one-minute IEX/SIP bars.
+    Transient socket failures reconnect with bounded exponential backoff.
+    """
+
     def __init__(self, settings: Settings, *, connector=connect, sleep=asyncio.sleep):
+        """! @brief Configure a stream with injectable connection and delay functions.
+        @param settings Validated Alpaca credentials, feed, and timeout/retry limits.
+        @param connector WebSocket connection factory.
+        @param sleep Async delay function used during reconnect backoff.
+        """
         self.settings, self._connect, self._sleep = settings, connector, sleep
 
     async def _events(self, socket) -> list[dict]:
+        """! @brief Read and validate one stream event array.
+        @param socket Authenticated or authenticating WebSocket connection.
+        @return Decoded Alpaca event objects.
+        @exception MarketDataError For malformed events or provider error messages.
+        """
         events = decode(await socket.recv())
         if not isinstance(events, list) or any(not isinstance(item, dict) for item in events):
             raise MarketDataError("Expected an Alpaca stream event array")
@@ -197,6 +269,13 @@ class AlpacaStream:
         return events
 
     async def _subscribe(self, socket, selected: tuple[str, ...]) -> list[dict]:
+        """! @brief Authenticate and wait for confirmation of bar subscriptions.
+        @param socket Connected WebSocket awaiting authentication.
+        @param selected Normalized symbols subscribed to bars and bar corrections.
+        @return Events received with the successful subscription acknowledgement.
+        @exception MarketDataError If Alpaca rejects the request or omits a channel.
+        @exception TimeoutError If authentication or subscription exceeds the configured limit.
+        """
         await socket.send(
             json.dumps(
                 {
@@ -237,6 +316,13 @@ class AlpacaStream:
         *,
         on_connected: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[Candle]:
+        """! @brief Yield live and corrected minute candles, reconnecting after transient drops.
+        @param tickers Explicit stock symbols to subscribe to.
+        @param on_connected Optional async recovery callback, called after each subscription.
+        @return An async stream of normalized IEX/SIP candles in provider arrival order.
+        @exception ValueError For invalid symbols.
+        @exception MarketDataError For rejected handshakes, malformed data or exhausted retries.
+        """
         selected = symbols(tickers)
         failures = 0
         while True:

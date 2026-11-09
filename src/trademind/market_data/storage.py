@@ -46,8 +46,20 @@ market_candles = Table(
 class CandleStore(Protocol):
     """! @brief Persistence interface consumed by history ingestion and stream recovery."""
 
-    def upsert(self, bars: Iterable[Candle]) -> int: ...
-    def latest_timestamp(self, symbol: str, feed: str) -> datetime | None: ...
+    def upsert(self, bars: Iterable[Candle]) -> int:
+        """! @brief Store one page of candles and update any corrected identities.
+        @param bars Normalized candles with explicit provenance and UTC timestamps.
+        @return Number of distinct candle identities written.
+        """
+        ...
+
+    def latest_timestamp(self, symbol: str, feed: str) -> datetime | None:
+        """! @brief Find the newest stored minute candle for stream recovery.
+        @param symbol Stock ticker.
+        @param feed Alpaca feed, IEX or SIP.
+        @return Latest UTC timestamp, or None when this series has no stored bars.
+        """
+        ...
 
 
 class SQLCandleStore:

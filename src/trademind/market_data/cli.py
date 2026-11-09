@@ -19,10 +19,17 @@ from .storage import SQLCandleStore
 
 
 async def run_stream(pipeline, settings, tickers):
+    """! @brief Persist a live stream and print each queued candle as JSON.
+    @param pipeline Ingestion pipeline that stores bars before dispatch.
+    @param settings Validated Alpaca credentials, feed, and timeout/retry limits.
+    @param tickers Explicit symbols to stream.
+    The producer and consumer are cancelled and awaited when either finishes or fails.
+    """
     buffer = LiveBuffer()
     producer = asyncio.create_task(pipeline.stream(tickers, AlpacaStream(settings), buffer))
 
     async def print_events():
+        """! @brief Drain the live queue and print newline-delimited candle JSON."""
         while True:
             candle = await buffer.queue.get()
             print(json.dumps(candle.to_json()), flush=True)
