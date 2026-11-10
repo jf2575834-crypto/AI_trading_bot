@@ -1,4 +1,5 @@
 # Team Project: TradeMind: AI-Enhanced Automated Trading System
+Team 1 
 Team Members:
 Gabriel Chambers — gabriel.chambers@bulldogs.aamu.edu
 Joel Friedman — joel.friedman@bulldogs.aamu.edu 
