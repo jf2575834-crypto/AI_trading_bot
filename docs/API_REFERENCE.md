@@ -125,6 +125,15 @@ waits for a consumer. `LiveBuffer.latest` separately keeps the newest candle for
 each ticker. A corrected bar at the same timestamp is still queued, so consumers
 should update that bar rather than treat it as a new time period.
 
+For a new decision, call `await buffer.next_for_decision(max_age=...)` with a
+positive `datetime.timedelta`. It filters at dequeue time, skipping stale or
+future minute bars, superseded versions, and timestamps already returned in that
+series. Age is measured from the candle's start timestamp. Use a single decision
+consumer and acknowledge returned items with `buffer.queue.task_done()`. Raw queue
+reads remain available for diagnostics/correction consumers; do not mix raw reads
+with the decision consumer on the same buffer. Deduplication is per buffer lifetime,
+and freshness must be checked again before orders if processing is delayed.
+
 Recovery backfills missing history into storage but does not replay those old
 bars as new live signals. After a gap, a strategy should reload the stored
 history it needs. This module provides the data flow; the strategy and backend

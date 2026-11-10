@@ -3,10 +3,11 @@ Storage failures propagate so callers do not mistake an unpersisted bar for a sa
 """
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from .alpaca import AlpacaClient, AlpacaStream
-from .models import Candle
+from .models import Candle, utc_datetime
 from .storage import CandleStore
 
 
@@ -24,6 +25,19 @@ class LiveBuffer:
             raise ValueError("Buffer capacity must be positive")
         self.queue: asyncio.Queue[Candle] = asyncio.Queue(maxsize=capacity)
         self.latest: dict[str, Candle] = {}
+        self._latest_by_series: dict[tuple[str, ...], Candle] = {}
+        self._last_decision: dict[tuple[str, ...], datetime] = {}
+
+    @staticmethod
+    def _series_key(candle: Candle) -> tuple[str, ...]:
+        return (
+            candle.provider,
+            candle.feed,
+            candle.adjustment,
+            candle.currency,
+            candle.symbol,
+            candle.timeframe,
+        )
 
     async def publish(self, candle: Candle) -> None:
         """! @brief Save the newest symbol snapshot and enqueue the persisted candle.
@@ -34,8 +48,50 @@ class LiveBuffer:
         previous = self.latest.get(candle.symbol)
         if previous is None or candle.timestamp >= previous.timestamp:
             self.latest[candle.symbol] = candle
+        key = self._series_key(candle)
+        previous = self._latest_by_series.get(key)
+        if previous is None or candle.timestamp >= previous.timestamp:
+            self._latest_by_series[key] = candle
         # Full queue applies backpressure; a consumer must drain it.
         await self.queue.put(candle)
+
+    async def next_for_decision(
+        self,
+        *,
+        max_age: timedelta,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> Candle:
+        """! @brief Wait for a fresh minute candle eligible for a new decision.
+        @param max_age Positive age limit measured from the bar's start timestamp.
+        @param now UTC-aware clock evaluated at dequeue time, injectable for tests.
+        Skip stale, future, superseded and already-returned timestamps per series.
+        Use one decision consumer per buffer; do not also drain the raw queue.
+        The caller owns task_done() for returned candles and must recheck freshness
+        before orders if processing takes time. Deduplication lasts for this buffer.
+        """
+        if max_age <= timedelta(0):
+            raise ValueError("Decision candle max_age must be positive")
+        while True:
+            candle = await self.queue.get()
+            accepted = False
+            try:
+                key = self._series_key(candle)
+                current_time = utc_datetime(now())
+                age = current_time - candle.timestamp
+                latest = self._latest_by_series.get(key)
+                previous = self._last_decision.get(key)
+                if (
+                    candle.timeframe == "1Min"
+                    and timedelta(0) <= age <= max_age
+                    and (latest is None or latest.timestamp > current_time or candle == latest)
+                    and (previous is None or candle.timestamp > previous)
+                ):
+                    self._last_decision[key] = candle.timestamp
+                    accepted = True
+                    return candle
+            finally:
+                if not accepted:
+                    self.queue.task_done()
 
 
 class IngestionPipeline:

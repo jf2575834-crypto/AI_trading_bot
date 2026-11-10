@@ -151,6 +151,7 @@ legacy standalone table and must not be applied to the shared database.
 
 ```python
 import asyncio
+from datetime import timedelta
 from trademind.market_data.alpaca import AlpacaClient, AlpacaStream
 from trademind.market_data.config import Settings
 from trademind.market_data.pipeline import IngestionPipeline, LiveBuffer
@@ -166,9 +167,10 @@ async def example():
             IngestionPipeline(client, store).stream(["AAPL"], AlpacaStream(settings), buffer)
         )
         try:
-            candle = await buffer.queue.get()
+            candle = await buffer.next_for_decision(max_age=timedelta(minutes=2))
             # Pass candle to the strategy's market-data handler.
             print(candle.to_json())
+            buffer.queue.task_done()
         finally:
             producer.cancel()
             await asyncio.gather(producer, return_exceptions=True)
@@ -180,6 +182,26 @@ persisted bars using bounded backpressure. A consumer must continuously drain it
 Late corrected bars share the original timestamp; consumers must treat them as
 updates to that candle and avoid producing duplicate trade decisions. Stored
 history recovery is not replayed as fresh strategy signals.
+
+For new live decisions, use `next_for_decision(max_age=...)` rather than reading
+the raw queue. It checks age when a candle leaves the queue, so time spent waiting
+counts toward the limit. It skips future timestamps, older/superseded candles,
+and timestamps already returned for the same provider/feed/adjustment/currency/
+symbol/timeframe series. When a correction is already queued before selection,
+only its latest version is eligible. Later corrections remain saved but cannot
+trigger a second decision for that timestamp on this buffer.
+
+The caller must choose a positive age limit. The two-minute example is measured
+from the minute bar's **start** timestamp, not its arrival or close time. Use one
+decision consumer per buffer and call `queue.task_done()` after processing each
+returned candle; skipped items are acknowledged internally. The method waits for
+a new eligible candle if every queued candle is rejected and can be cancelled.
+The CLI intentionally prints every persisted event from the raw queue, including
+corrections; that output is a diagnostic feed, not a filtered decision feed.
+
+This filter does not place orders, replay missed signals, or provide durable
+decision deduplication across restarts. Strategies must reload history after gaps
+and recheck freshness before submitting orders if computation takes time.
 
 On connection or reconnect, the pipeline backfills from the persisted latest 1Min
 timestamp with a one-minute overlap before dispatching live data. Seed history
